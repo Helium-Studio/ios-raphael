@@ -45,8 +45,15 @@ Linux 参考为 `$HOME/kernel/zundamon_raphael` 的 DTS、`gcc-sm8150.c`、
 验证：`tools/check-raphael-touch.py XNU_TREE` 对实际 C 解码函数执行 ASan/UBSan
 测试，覆盖0–10触点、抬起、镜像、截断、坏校验、重复ID及越界；两个修改文件本地
 arm64 Mach-O 交叉编译通过。CI0083：[39424091174](https://github.com/HeliumStudio-Dev/ios-raphael/actions/runs/39424091174)。
-CI 已通过（7分27秒），0083 已临时启动，正在等待触控实测。
-真机触控结果见 NOTES.md；构建成功本身不代表触控已验证。
+0083 CI 已通过（7分27秒），真机能进锁屏，但触控无响应。日志表明初始化停在
+GCC1e008的80000002，尚未读取触控IC。该时钟设置了HWCGbit1，Linux的
+`clk_branch_wait()`在自动门控模式跳过halt等待；0084补上这一处理，仍检查真正
+未开启的时钟。主机回归覆盖了现场HWCG状态、无HWCG的halt、未开启SE时钟及sweet路径。
+
+临时shim探针的用户读数为GENI_FW303、HW_PARAM0、TX_HW20102a64、RX_HW20104900、
+SE_STAT0，确认ABL留下可用的I²C固件、32位/深度16的FIFO及空闲控制器。
+0084 CI：[39426109080](https://github.com/HeliumStudio-Dev/ios-raphael/actions/runs/39426109080)。
+真机触控结果见 NOTES.md；构建和前置条件检查通过本身不代表触控已验证。
 
 构建触控测试镜像（内核须包含0083）：
 
