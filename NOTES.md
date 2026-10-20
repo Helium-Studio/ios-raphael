@@ -2,6 +2,13 @@
 
 ## Agent handoff / active work (2026-10-15, latest)
 
+### >>> UPDATE 2026-10-20 (ACTIVE: PM8150 keys + full8 CPU bring-up) <<<
+
+- User explicitly requests **buttons and all8 CPUs** next, and returned to Bootloader. Scope is temporary fastboot boot tests; keep installed0082e,rootdata,verified backups,recovery/modem/persist/GPT intact. Entered installed Recovery with OEM command OKAY0.002s to finish touch-log capture and inspect hardware.
+- **0084 touch log collected read-only:** `research/raphael-0084-boot.txt` + `.bin`,total264680bytes,flush64,notwrapped. Contains repeated down/up pairs and bottom-edge swipes; **106 down /106 up,zero touch errors,zero kernel panics**, including bottomedge y2339. Prior user already confirmed touch usable. No partition flash in this phase.
+- **Hardware reference now checked:** Recovery MIDR cpu0–3=51df805e,cpu4–7=51df804e;maxfreq1785600/2419200/2841600kHz. PM8150 SID0 GPIO6:RTc510=01,subtypec505=11,modec540=00,enablec546=80;PON0810 idle04. Evidence `research/raphael-keys-cpu-hardware.txt`;debugfs selector writes only choose reads, no PMIC data writes. Currentphone=installedRecovery.
+- **Next implementation:** adapt sweet_keys volume-up fromSID4/c110 toSID0/c510,retain read-only observer/APID path and firmware-input checks. Add explicit raphael1/4/8CPU ADT/build/check profiles with real MPIDRs/frequencies and per-core cache IDs. Reuse existing8CPU PSCI/GIC/SGI framework; first test4A55 then all8, retain touch. CPU init should logMIDR for per-core verification. 0085 adapts the fixed board-specific GPIO base/PPID, retains PMIC-input-enable checks and observer read only. CPU driver now names Kryo485 and logs each core MIDR without changing existing PSCI sequence. Actual board matcher/APID selection host testsASan/UBSan PASS; both modifiedTUs cross-compiled0failures. Need CI for keys/kernel diagnostics; ADT-only SMP probes can use already verified0084 whileCI builds. Verify actual keys/UI plus persistent CPU_ON/SGI logs before claiming success.
+
 ### >>> UPDATE 2026-10-20 (raphael stage 2 SUCCESS; stage 3 TOUCH PHYSICALLY PASSED on0084) <<<
 
 - **Physical success:** user confirmed actual Apple logo, then **lock screen reached**. Logo dwell was slow startup, not a demonstrated hang. Both prior requested stage-two goals are achieved. Persistent boot0082e and userdata v1 remain installed; verified Android backups retained. No further partition flash is needed to diagnose touch.

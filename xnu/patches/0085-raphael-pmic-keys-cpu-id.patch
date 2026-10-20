@@ -1,0 +1,185 @@
+--- a/bsd/dev/sweet_keys.c
++++ b/bsd/dev/sweet_keys.c
+@@ -1,6 +1,6 @@
+ /*
+- * Minimal polled SWEET keys. Call once after the scheduler is running.
+- * See hw-report.md: volume-up is PM6150L SID 4, NOT PM6150 SID 0.
++ * Minimal polled SWEET / RAPHAEL keys. Call once after the scheduler is running.
++ * Volume-up: sweet PM6150L SID4/GPIO2, raphael PM8150 SID0/GPIO6.
+  * PMIC access is READ ONLY: the sole MMIO write issues EXT_READL on an
+  * observer channel. No PMIC config, IRQ acknowledge or reset writes exist.
+  */
+@@ -12,6 +12,7 @@
+ #include <kern/sched_prim.h>
+ #include <machine/machine_routines.h>
+ #include <pexpert/pexpert.h>
++#include <pexpert/device_tree.h>
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ extern void sweet_hid_key(int key, int down);
+@@ -21,14 +22,44 @@
+ #define KEYS_OBS_PA      0x0e600000u
+ #define KEYS_CNFG_PA     0x0c40a000u
+ #define KEYS_PON_RT      0x0810u
+-#define KEYS_GPIO_RT     0xc110u
+ #define KEYS_NO_APID     0xffffu
+ 
+ static vm_offset_t keys_core, keys_obs, keys_cnfg;
+ static uint16_t keys_pon_apid = KEYS_NO_APID, keys_gpio_apid = KEYS_NO_APID;
+ static uint32_t keys_version, keys_last_status;
+ static bool keys_started;
++static uint16_t keys_gpio_base = 0xc100u, keys_gpio_ppid = 0x4c1u;
+ static int keys_sleep_chan;
++
++/* Return a fixed board profile; never accept MMIO/PMIC addresses from boot args. */
++static int
++keys_board(void)
++{
++	DTEntry root;
++	const char *compatible;
++	unsigned size;
++	if (SecureDTLookupEntry(NULL, "/", &root) != kSuccess ||
++	    SecureDTGetProperty(root, "compatible", (const void **)&compatible, &size) != kSuccess) {
++		return -1;
++	}
++	for (unsigned off = 0; off < size;) {
++		unsigned len = 0;
++		while (off + len < size && compatible[off + len]) {
++			++len;
++		}
++		if (off + len == size) {
++			break;
++		}
++		if (len == sizeof("xiaomi,raphael") - 1 && !memcmp(compatible + off, "xiaomi,raphael", len)) {
++			return 1;
++		}
++		if (len == sizeof("xiaomi,sweet") - 1 && !memcmp(compatible + off, "xiaomi,sweet", len)) {
++			return 0;
++		}
++		off += len + 1;
++	}
++	return -1;
++}
+ 
+ static uint32_t
+ keys_rd(vm_offset_t base, uint32_t off)
+@@ -100,7 +131,7 @@
+ 	for (;;) {
+ 		uint8_t pon = 0, gpio = 0;
+ 		bool pok = keys_read(keys_pon_apid, KEYS_PON_RT, &pon);
+-		bool gok = keys_read(keys_gpio_apid, KEYS_GPIO_RT, &gpio);
++		bool gok = keys_read(keys_gpio_apid, keys_gpio_base + 0x10u, &gpio);
+ 		int now[3] = {!!(pon & 1u), !(gpio & 1u), !!(pon & 2u)};
+ 		if (!pok || !gok) {
+ 			if ((errors++ % 250u) == 0) {
+@@ -113,8 +144,8 @@
+ 		for (int k = 0; k < 3; ++k) {
+ 			if ((k == 1 ? gok : pok) && now[k] != state[k]) {
+ 				state[k] = now[k];
+-				printf("SWEET KEYS: key=%d down=%d pon=%#x gpio4:c110=%#x\n",
+-				    k, state[k], pon, gpio);
++				printf("SWEET KEYS: key=%d down=%d pon=%#x gpio-ppid=%#x rt=%#x\n",
++				    k, state[k], pon, keys_gpio_ppid, gpio);
+ 				sweet_hid_key(k, state[k]);
+ 			}
+ 		}
+@@ -135,6 +166,15 @@
+ 	if (!enabled) {
+ 		printf("SWEET KEYS: disabled (sweetkeys=0)\n");
+ 		return;
++	}
++	int board = keys_board();
++	if (board < 0) {
++		printf("SWEET KEYS: unsupported board; no MMIO access\n");
++		return;
++	}
++	if (board == 1) {
++		keys_gpio_base = 0xc500u;
++		keys_gpio_ppid = 0x0c5u;
+ 	}
+ 	keys_core = ml_io_map(KEYS_CORE_PA, 0x2000);
+ 	keys_cnfg = ml_io_map(KEYS_CNFG_PA, 0x1000);
+@@ -152,21 +192,21 @@
+ 		return;
+ 	}
+ 	keys_pon_apid = keys_find_apid(0x008, count);
+-	keys_gpio_apid = keys_find_apid(0x4c1, count);
++	keys_gpio_apid = keys_find_apid(keys_gpio_ppid, count);
+ 	uint8_t pon = 0, gpio = 0, mode = 0, en = 0, subtype = 0;
+ 	bool pok = keys_read(keys_pon_apid, KEYS_PON_RT, &pon);
+-	bool gok = keys_read(keys_gpio_apid, KEYS_GPIO_RT, &gpio);
+-	bool mok = keys_read(keys_gpio_apid, 0xc140, &mode);
+-	bool eok = keys_read(keys_gpio_apid, 0xc146, &en);
+-	bool sok = keys_read(keys_gpio_apid, 0xc105, &subtype);
+-	printf("SWEET KEYS: arb=%#x apids=%u pon-apid=%u gpio4-apid=%u pon=%#x/%d gpio=%#x/%d mode=%#x/%d en=%#x/%d subtype=%#x/%d\n",
++	bool gok = keys_read(keys_gpio_apid, keys_gpio_base + 0x10u, &gpio);
++	bool mok = keys_read(keys_gpio_apid, keys_gpio_base + 0x40u, &mode);
++	bool eok = keys_read(keys_gpio_apid, keys_gpio_base + 0x46u, &en);
++	bool sok = keys_read(keys_gpio_apid, keys_gpio_base + 0x05u, &subtype);
++	printf("SWEET KEYS: arb=%#x apids=%u pon-apid=%u gpio-apid=%u ppid=%#x pon=%#x/%d gpio=%#x/%d mode=%#x/%d en=%#x/%d subtype=%#x/%d\n",
+ 	    keys_version, count, keys_pon_apid, keys_gpio_apid,
+-	    pon, pok, gpio, gok, mode, mok, en, eok, subtype, sok);
++	    keys_gpio_ppid, pon, pok, gpio, gok, mode, mok, en, eok, subtype, sok);
+ 	/* GPIO configuration belongs to firmware. Diagnose, never repair it here. */
+ 	unsigned dir = subtype >= 0x10u && subtype <= 0x13u ?
+ 	    mode & 3u : (mode >> 4) & 7u;
+ 	if (!eok || !mok || !sok || !(en & 0x80u) || (dir != 0 && dir != 2)) {
+-		printf("SWEET KEYS: GPIO2 not confirmed enabled as input; volume-up withheld, PMIC unchanged\n");
++		printf("SWEET KEYS: volume GPIO not confirmed enabled as input; volume-up withheld, PMIC unchanged\n");
+ 		keys_gpio_apid = KEYS_NO_APID;
+ 	}
+ 	if (!pok && !gok) {
+--- a/iokit/Kernel/arm/SweetCPU.cpp
++++ b/iokit/Kernel/arm/SweetCPU.cpp
+@@ -1,7 +1,7 @@
+ /*
+- * A55 SMP bring-up for sweet using XNU's legacy IOCPU interface and PSCI.
++ * Qualcomm SMP bring-up using XNU's legacy IOCPU interface and PSCI.
+  * The architected timer and SGI1 already enter through pe_fiq/sleh_irq.
+- * CPU_OFF, suspend and the A76 cores still require separate platform work.
++ * CPU_OFF and suspend still require separate platform work.
+  */
+ #include <pexpert/arm64/board_config.h>
+ 
+@@ -73,7 +73,7 @@
+ 	if (*(const uint32_t *)reg->getBytesNoCopy() != cpu->phys_id) {
+ 		return false;
+ 	}
+-	/* MPIDR Aff1 = core: 0x000-0x500 A55, 0x600/0x700 A76 */
++	/* Both boards use Aff1=core; SM8150 has A55 0-3 and A76 4-7. */
+ 	if (cpu->phys_id > 0x700 || (cpu->phys_id & 0xff) != 0 ||
+ 	    topology->num_cpus > SWEET_SMP_MAX_CPUS) {
+ 		panic("SWEET CPU: invalid topology cpu=%u mpidr=0x%x count=%u",
+@@ -82,7 +82,10 @@
+ 	if (!IOCPU::start(provider)) {
+ 		return false;
+ 	}
+-	cpuName = OSSymbol::withCStringNoCopy("Kryo 470");
++	OSData *compatible = OSDynamicCast(OSData, provider->getProperty("compatible"));
++	bool kryo485 = compatible != NULL && compatible->getLength() >= sizeof("qcom,kryo485") &&
++	    !memcmp(compatible->getBytesNoCopy(), "qcom,kryo485", sizeof("qcom,kryo485"));
++	cpuName = OSSymbol::withCStringNoCopy(kryo485 ? "Kryo 485" : "Kryo 470");
+ 	if (cpuName == NULL) {
+ 		return false;
+ 	}
+@@ -144,7 +147,7 @@
+ 		}
+ 		IOSleep(1);
+ 	}
+-	/* The supplied ADT has cpu0 as the boot CPU and ascending A55 nodes. */
++	/* The supplied ADT has cpu0 as the boot CPU and ascending physical-core nodes. */
+ 	if (topology->boot_cpu->cpu_id != 0 || topology->boot_cpu->phys_id != 0) {
+ 		panic("SWEET CPU: expected boot MPIDR 0 and logical CPU 0");
+ 	}
+@@ -200,9 +203,9 @@
+ 	 * Waiting here with DAIF.I set would deadlock every secondary. */
+ 	signalCPU(this);
+ 	setCPUState(kIOCPUStateRunning);
+-	kprintf("SWEET CPU: cpu=%u entered initCPU mpidr=0x%llx EL%llu IRQs=%u\n",
++	kprintf("SWEET CPU: cpu=%u entered initCPU mpidr=0x%llx midr=0x%llx EL%llu IRQs=%u\n",
+ 	    getCPUNumber(), __builtin_arm_rsr64("MPIDR_EL1") & 0xffffULL,
+-	    __builtin_arm_rsr64("CurrentEL") >> 2, ml_get_interrupts_enabled());
++	    __builtin_arm_rsr64("MIDR_EL1"), __builtin_arm_rsr64("CurrentEL") >> 2, ml_get_interrupts_enabled());
+ 	__atomic_store_n(&initialized, 1, __ATOMIC_RELEASE);
+ }
+ 
