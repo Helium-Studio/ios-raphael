@@ -383,7 +383,7 @@ void shim_main(uint64_t dtb)
 	stage = "loader";
 	con_clear(RED);
 #if defined(RAPHAEL_STAGE1)
-	con_str("SHIM", "raphael: RAM-only XNU stage 1");
+	con_str("SHIM", "raphael: XNU loader");
 	con_display_start();
 	con_hex("EL", rsr("CurrentEL"));
 	con_hex("CNTFRQ", rsr("cntfrq_el0"));

@@ -4,8 +4,9 @@
 
 **Redmi K20 Pro / raphael:** XNU boot and screen logs are now verified on SM8150.
 See [raphael stage one](docs/RAPHAEL_STAGE1.md) for its temporary boot image,
-backup requirements and local root-image packaging. Its UFS, GUI and input
-paths still require board-specific bring-up.
+backup requirements and local root-image packaging. [Stage two](docs/RAPHAEL_STAGE2.md)
+prepares the userdata-backed boot; its physical result is tracked in NOTES.md.
+GUI and input paths still require board-specific validation.
 
 This project ports Apple's open-source XNU kernel (xnu-8796, the iOS 16 generation) to the Xiaomi Redmi Note 10 Pro (`sweet`, Qualcomm SM7150 / Snapdragon 732G). On top of it runs the **unmodified iOS 16.7.16 (20H392) userland of the iPhone X**: launchd, the system daemons, backboardd, SpringBoard and the stock apps.
 

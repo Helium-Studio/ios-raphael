@@ -2,7 +2,7 @@
 """Build the minimal Apple Device Tree that the SWEET xnu needs to boot.
 
 Only what the early boot path actually reads (see NOTES.md); every MMIO
-address comes from the sweet live FDT. Usage: mkadt.py OUT.adt [--dump] [--qemu] [--highmem] [--raphael-stage1]
+address comes from the sweet live FDT. Usage: mkadt.py OUT.adt [--dump] [--qemu] [--highmem] [--raphael-stage1 | --raphael]
 """
 import hashlib, os, struct, sys
 
@@ -70,13 +70,14 @@ def node(name, props=(), children=()):
     return n
 
 
-def build(seed=None, qemu=False, highmem=False, raphael_stage1=False):
+def build(seed=None, qemu=False, highmem=False, raphael_stage1=False, raphael=False):
     """qemu=True: same tree, but with QEMU virt's GIC addresses and CNTFRQ (tools/qemu-sweet.py)."""
     phys_base, mem_size = (HIGH_PHYS_BASE, HIGH_MEM_SIZE) if highmem else (PHYS_BASE, MEM_SIZE)
-    if raphael_stage1:
-        if qemu or highmem:
-            raise ValueError('--raphael-stage1 cannot be combined with --qemu or --highmem')
-        phys_base, mem_size = RAPHAEL_PHYS_BASE, RAPHAEL_MEM_SIZE
+    is_raphael = raphael_stage1 or raphael
+    if is_raphael:
+        if qemu or highmem or (raphael_stage1 and raphael):
+            raise ValueError('choose one raphael profile; do not combine with --qemu or --highmem')
+        phys_base, mem_size = RAPHAEL_PHYS_BASE, HIGH_MEM_SIZE if raphael else RAPHAEL_MEM_SIZE
     gicd, gicr, timebase = (QEMU_GICD, QEMU_GICR, QEMU_TIMEBASE) if qemu else (GICD, GICR, TIMEBASE)
     seed = seed if seed is not None else os.urandom(64)
     phandle = iter(range(1, 1000))
@@ -132,11 +133,11 @@ def build(seed=None, qemu=False, highmem=False, raphael_stage1=False):
     # and uses cpus=N to select an initial prefix (N <= 8).
     # QEMU retains its original single-CPU tree: its MPIDRs differ from sweet.
     cpu_nodes = []
-    for core in range(1 if qemu or raphael_stage1 else 8):
+    for core in range(1 if qemu or is_raphael else 8):
         cpu_nodes.append(node(f'cpu{core}', [
             ph(),
             ('device_type', cstr('cpu')),
-            ('compatible', cstr('qcom,kryo485' if raphael_stage1 else 'qcom,kryo470') + cstr('ARM,v8')),
+            ('compatible', cstr('qcom,kryo485' if is_raphael else 'qcom,kryo470') + cstr('ARM,v8')),
             ('reg', u32(core << 8)),  # actual MPIDR Aff1:Aff0, NOT logical ID
             ('cpu-id', u32(core)),   # descriptive: XNU assigns IDs by DT order
             ('cluster-id', u32(0)),  # descriptive; see ml_parse_cpu_topology
@@ -190,9 +191,9 @@ def build(seed=None, qemu=False, highmem=False, raphael_stage1=False):
     fbcon = node('sweet-fbcon', [
         ph(),
         # The 36 MiB splash reservation exceeds the early I/O map's first L2.
-        ('reg', u64(FB, (FB_STRIDE * 2340 + 0x3fff) & ~0x3fff if raphael_stage1 else FB_SIZE)),
+        ('reg', u64(FB, (FB_STRIDE * 2340 + 0x3fff) & ~0x3fff if is_raphael else FB_SIZE)),
         ('width', u32(FB_W)),
-        ('height', u32(2340 if raphael_stage1 else FB_H)),
+        ('height', u32(2340 if is_raphael else FB_H)),
         ('stride', u32(FB_STRIDE)),
     ])
 
@@ -232,10 +233,10 @@ def build(seed=None, qemu=False, highmem=False, raphael_stage1=False):
 
     # Identity of the iPhone X whose userland runs here: compatible[0] is
     # hw.model/hw.target (D22AP), model is hw.machine/hw.product
-    # (iPhone10,3). 'xiaomi,sweet' stays for SweetPlatformExpert matching.
+    # (iPhone10,3). Keep the board compatible for SweetPlatformExpert matching.
     return node('device-tree', [
         ph(),
-        ('compatible', cstr('D22AP') + cstr('iPhone10,3') + cstr('xiaomi,sweet') + cstr('qcom,sm7150') + cstr('AppleARM')),
+        ('compatible', cstr('D22AP') + cstr('iPhone10,3') + cstr('xiaomi,raphael' if raphael else 'xiaomi,sweet') + cstr('qcom,sm8150' if raphael else 'qcom,sm7150') + cstr('AppleARM')),
         ('model', cstr('iPhone10,3')),
         ('target-type', cstr('D22')),
         ('target-sub-type', cstr('D22AP')),
@@ -247,7 +248,7 @@ def build(seed=None, qemu=False, highmem=False, raphael_stage1=False):
 
 if __name__ == '__main__':
     root = build(qemu='--qemu' in sys.argv, highmem='--highmem' in sys.argv,
-                 raphael_stage1='--raphael-stage1' in sys.argv)
+                 raphael_stage1='--raphael-stage1' in sys.argv, raphael='--raphael' in sys.argv)
     blob = adt.serialize(root)
     open(sys.argv[1], 'wb').write(blob)
     if '--dump' in sys.argv:
