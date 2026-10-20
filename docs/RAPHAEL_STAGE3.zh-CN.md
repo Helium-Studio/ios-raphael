@@ -1,8 +1,8 @@
 # raphael 第三阶段：触控与 sweet 差异
 
 2026-10-20：用户已确认 0082e 能显示苹果 Logo 并进入锁屏，Logo 停留是启动慢。
-第三阶段的 GT9886 触控已在0084获用户确认可用。当前已安装的boot仍为0082e；
-0084通过临时启动验证，userdata保留，成功镜像与校验和见NOTES.md。
+第三阶段已通过0085真机验证：GT9886触控、电源与音量上下按键、全部8核启动正常。
+当前已安装的boot仍为0082e；0085通过临时启动验证，userdata保留，镜像与校验和见下文及NOTES.md。
 
 ## 已抓取的启动日志
 
@@ -108,7 +108,9 @@ CPU的Recovery实测MIDR为0–3:51df805e、4–7:51df804e。
 GICv3和SGI1启动框架。每核在0085记录MIDR，以启动日志中CPU_ON、SGI和8/8初始化完成为证据，
 并检查随后GUI/触控/按键。0084八核探针已获用户确认锁屏与触控正常，
 持久日志记录CPU1–7的PSCI返回0、MPIDR0..700全部上线、8/8初始化及每核SGI1通过。
-0085八核＋按键镜像已临时启动，按键实测待完成。一个同构SMP集群暂不反映核心性能差异，
+0085八核＋按键镜像已获用户确认全部正常；持久日志再次确认8/8上线、全部SGI1通过，
+三种按键均有完整按下/松开与HID事件，触控9次按下/9次松开，未记录kernel panic或按键读取错误。
+一个同构SMP集群暂不反映核心性能差异，
 未实现DVFS或系统休眠。
 
 ```sh
@@ -121,3 +123,14 @@ fastboot boot shim/out/raphael-stage3.img
 `tools/check-raphael-keys.py XNU_TREE` 检查实际板型匹配与APID选择，
 `tools/check-raphael-smp.py` 检查MPIDR、频率分组、cache ID和配置隔离。
 这些主机检查不替代真机的按键、电源亮灭屏和全部CPU启动验证。
+
+已验证镜像：`shim/out/raphael-0085-keys-8cpu.img`（16961536字节），SHA256：
+
+```text
+4b13fc2ac9a4e20e915d06ca5fbb6fb47221daccdabab22aea7cc2444a779f4d
+```
+
+内核CI：[39429823138](https://github.com/HeliumStudio-Dev/ios-raphael/actions/runs/39429823138)，
+源代码提交54d37a2，构建工具提交1b1cf43。私有启动日志：`research/raphael-0085-keys-8cpu-boot.txt`。
+本轮只临时启动，未刷写boot；重启后仍会回到旧0082e，持久安装需另行明确要求。
+电源键锁屏/唤醒已验证；实际面板断电、SoC休眠、DVFS、温控和长时间压力测试尚未完成。
