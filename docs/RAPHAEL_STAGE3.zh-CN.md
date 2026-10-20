@@ -1,7 +1,8 @@
 # raphael 第三阶段：触控与 sweet 差异
 
 2026-10-20：用户已确认 0082e 能显示苹果 Logo 并进入锁屏，Logo 停留是启动慢。
-第三阶段先恢复触控；当前已安装的 boot 和 userdata 保留，触控版本用临时启动验证。
+第三阶段的 GT9886 触控已在0084获用户确认可用。当前已安装的boot仍为0082e；
+0084通过临时启动验证，userdata保留，成功镜像与校验和见NOTES.md。
 
 ## 已抓取的启动日志
 
@@ -53,9 +54,10 @@ GCC1e008的80000002，尚未读取触控IC。该时钟设置了HWCGbit1，Linux�
 临时shim探针的用户读数为GENI_FW303、HW_PARAM0、TX_HW20102a64、RX_HW20104900、
 SE_STAT0，确认ABL留下可用的I²C固件、32位/深度16的FIFO及空闲控制器。
 0084 CI：[39426109080](https://github.com/HeliumStudio-Dev/ios-raphael/actions/runs/39426109080)。
-真机触控结果见 NOTES.md；构建和前置条件检查通过本身不代表触控已验证。
+0084 CI已通过（7分45秒），21:04临时启动，用户确认触控可用。
+触点日志及更细的手势/多指验证结果见NOTES.md；未据此宣称其他硬件已移植。
 
-构建触控测试镜像（内核须包含0083）：
+构建触控测试镜像（内核须包含0083和0084）：
 
 ```sh
 bash tools/build-raphael-stage2.sh KERNEL RAPHAEL_DTB --touch

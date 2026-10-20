@@ -6,8 +6,9 @@
 See [raphael stage one](docs/RAPHAEL_STAGE1.md) for its temporary boot image,
 backup requirements and local root-image packaging. [Stage two](docs/RAPHAEL_STAGE2.md)
 has reached the iOS lock screen on userdata-backed storage.
-[Stage three](docs/RAPHAEL_STAGE3.zh-CN.md) covers GT9886 touch bring-up and the
-hardware differences from sweet; physical test results are tracked in NOTES.md.
+[Stage three](docs/RAPHAEL_STAGE3.zh-CN.md) has verified GT9886 touch on a temporary
+0084 boot and documents the hardware differences from sweet. Exact images and
+physical test results are tracked in NOTES.md.
 
 This project ports Apple's open-source XNU kernel (xnu-8796, the iOS 16 generation) to the Xiaomi Redmi Note 10 Pro (`sweet`, Qualcomm SM7150 / Snapdragon 732G). On top of it runs the **unmodified iOS 16.7.16 (20H392) userland of the iPhone X**: launchd, the system daemons, backboardd, SpringBoard and the stock apps.
 
