@@ -10,14 +10,27 @@ source = (Path(sys.argv[1]) / 'bsd/dev/sweet_touch.c').read_text()
 start = source.index('static int\ntouch_normandy_decode(')
 end = source.index('\nstatic int\n', start + 1)
 decoder = source[start:end]
+start = source.index('static bool\ntouch_clocks(')
+end = source.index('\n/* Called only', start)
+clocks = source[start:end]
 harness = r'''
 #include <assert.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
 #include <errno.h>
+#include <stdio.h>
 #define TOUCH_MAX 10u
 ''' + decoder + r'''
+typedef uintptr_t vm_offset_t;
+#define TOUCH_GCC_VOTE 0x5200cu
+#define TOUCH_RCG 0x18148u
+static struct { bool raphael; vm_offset_t gcc; } st;
+static uint32_t regs[0x60000 / 4];
+static uint32_t touch_rd(vm_offset_t base, uint32_t off) { (void)base; return regs[off / 4]; }
+static void touch_wr(vm_offset_t base, uint32_t off, uint32_t value) { (void)base; regs[off / 4] = value; }
+static bool touch_wait_clear(vm_offset_t base, uint32_t off, uint32_t mask) { return !(touch_rd(base, off) & mask); }
+''' + clocks + r'''
 static void checksum(uint8_t *b, unsigned n) {
     unsigned sum = 0;
     for (unsigned i = 0; i < n - 1; i++) sum += b[i];
@@ -28,6 +41,20 @@ static void point(uint8_t *b, unsigned i, unsigned id, unsigned x, unsigned y) {
     p[0] = id; p[1] = x; p[2] = x >> 8; p[3] = y; p[4] = y >> 8;
 }
 int main(void) {
+    st.raphael = true;
+    regs[(0x1e3a8 + 0x14) / 4] = 1;
+    regs[(0x1e3a8 + 0x1c) / 4] = 1;
+    regs[0x1e008 / 4] = 0x80000002u; /* observed idle HWCG state */
+    assert(touch_clocks() && regs[0x52014 / 4] == 0x46);
+    regs[0x1e008 / 4] = 0x80000000u; /* genuinely halted, no HWCG */
+    assert(!touch_clocks());
+    regs[0x1e008 / 4] = 0x80000002u;
+    regs[0x1e3a4 / 4] = 0x80000000u; /* serial clock must still be checked */
+    assert(!touch_clocks());
+    memset(regs, 0, sizeof(regs)); st.raphael = false;
+    regs[(TOUCH_RCG + 0x14) / 4] = 1;
+    regs[(TOUCH_RCG + 0x1c) / 4] = 1;
+    assert(touch_clocks() && regs[0x5200c / 4] == ((15u << 18) | (1u << 23)));
     uint8_t b[84] = {0x80, 0};
     int x[10] = {0}, y[10] = {0}; uint32_t mask = 0x3ff;
     checksum(b, 4);
@@ -68,4 +95,4 @@ with tempfile.TemporaryDirectory(prefix='raphael-touch-') as tmp:
     subprocess.run([os.environ.get('CC', 'cc'), '-Wall', '-Wextra', '-Werror',
                     '-fsanitize=address,undefined', '-g', str(c), '-o', str(exe)], check=True)
     subprocess.run([str(exe)], check=True)
-print('PASS: actual Normandy decoder, 0–10 fingers, mirror, bounds, checksum and malformed frames (ASan/UBSan)')
+print('PASS: actual Normandy decoder and clock guards, including idle HWCG, stopped clocks and sweet (ASan/UBSan)')

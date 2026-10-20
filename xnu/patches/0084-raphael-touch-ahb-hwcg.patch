@@ -1,0 +1,15 @@
+--- a/bsd/dev/sweet_touch.c
++++ b/bsd/dev/sweet_touch.c
+@@ -175,6 +175,12 @@
+ 	const uint32_t *branch = st.raphael ? raphael_branches : branches;
+ 	unsigned count = st.raphael ? 3u : 5u;
+ 	for (unsigned i = 0; i < count; ++i) {
++		/* Linux clk_branch_wait also skips halt polling in HWCG mode. */
++		if (st.raphael && branch[i] == 0x1e008 &&
++		    (touch_rd(st.gcc, branch[i]) & 2u)) {
++			printf("SWEET TOUCH: wrapper2 S-AHB hardware clock gating active\n");
++			continue;
++		}
+ 		if (!touch_wait_clear(st.gcc, branch[i], 1u << 31)) {
+ 			printf("SWEET TOUCH: GCC branch %#x halted (%#x)\n", branch[i],
+ 			    touch_rd(st.gcc, branch[i]));
