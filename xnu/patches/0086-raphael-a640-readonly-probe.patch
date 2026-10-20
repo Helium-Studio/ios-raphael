@@ -1,0 +1,135 @@
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -107,6 +107,7 @@
+ bsd/dev/sweet_ufs.c			standard
+ bsd/dev/sweet_sample.c			standard
+ bsd/dev/sweet_keys.c			standard
++bsd/dev/sweet_gpu.c			standard
+ bsd/dev/sweet_touch.c			standard
+ bsd/dev/sweet_rpmh.c			standard
+ bsd/dev/sweet_spmi.c			standard
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -53,6 +53,7 @@
+ extern void sweet_keys_init(void);
+ extern void sweet_touch_init(void);
+ extern void sweet_usb_probe(void);
++extern void sweet_gpu_probe(void);
+ 
+ #define REG_CAP         0x00
+ #define REG_IS          0x20
+@@ -666,6 +667,7 @@
+ 	sweet_keys_init();
+ 	sweet_touch_init();
+ 	sweet_usb_probe();
++	sweet_gpu_probe();
+ 	return 0;
+ }
+ 
+--- /dev/null
++++ b/bsd/dev/sweet_gpu.c
+@@ -0,0 +1,104 @@
++/*
++ * Raphael A640 bring-up snapshot. MMIO reads only; never start DMA or publish
++ * IOAcceleratorES until the command processor and userspace backend work.
++ * Off domains are not probed: an unpowered register read may hang the SoC.
++ */
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++#include <sys/param.h>
++#include <sys/systm.h>
++#include <pexpert/pexpert.h>
++#include <pexpert/device_tree.h>
++extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
++void sweet_gpu_probe(void);
++
++static bool
++gpu_is_raphael(void)
++{
++	DTEntry root;
++	const char *p;
++	unsigned size;
++	if (SecureDTLookupEntry(NULL, "/", &root) != kSuccess ||
++	    SecureDTGetProperty(root, "compatible", (const void **)&p, &size) != kSuccess) {
++		return false;
++	}
++	for (unsigned off = 0; off < size;) {
++		unsigned n = 0;
++		while (off + n < size && p[off + n]) { ++n; }
++		if (off + n == size) { return false; }
++		if (n == sizeof("xiaomi,raphael") - 1 && !memcmp(p + off, "xiaomi,raphael", n)) { return true; }
++		off += n + 1;
++	}
++	return false;
++}
++
++static uint32_t
++gpu_rd(vm_offset_t bank, unsigned off)
++{
++	return *(const volatile uint32_t *)(bank + off);
++}
++
++static bool
++gpu_clock_live(uint32_t cbcr)
++{
++	return (cbcr & 1u) && (!(cbcr & (1u << 31)) || (cbcr & 2u));
++}
++
++void
++sweet_gpu_probe(void)
++{
++	int enabled = 0;
++	(void)PE_parse_boot_argn("raphaelgpu", &enabled, sizeof(enabled));
++	if (!enabled || !gpu_is_raphael()) { return; }
++	printf("RAPHAEL GPU: A640 read-only probe; CPU page=%lu TCR=%#llx\n",
++	    (unsigned long)PAGE_SIZE, __builtin_arm_rsr64("TCR_EL1"));
++	vm_offset_t gcc = ml_io_map(0x00100000, 0x100000);
++	if (!gcc) { printf("RAPHAEL GPU: GCC map failed\n"); return; }
++	uint32_t cfg = gpu_rd(gcc, 0x71004), mem = gpu_rd(gcc, 0x7100c);
++	printf("RAPHAEL GPU: GCC cfg=%#x memnoc=%#x dvm=%#x axi=%#x\n",
++	    cfg, mem, gpu_rd(gcc, 0x71018), gpu_rd(gcc, 0x71154));
++	if (!gpu_clock_live(cfg)) {
++		printf("RAPHAEL GPU: config clock off; GPUCC/GMU/GX/SMMU untouched\n");
++		return;
++	}
++	vm_offset_t cc = ml_io_map(0x02c90000, 0xc000);
++	if (!cc) { printf("RAPHAEL GPU: GPUCC map failed\n"); return; }
++	uint32_t cx = gpu_rd(cc, 0x106c), gx = gpu_rd(cc, 0x100c);
++	uint32_t ahb = gpu_rd(cc, 0x1078), gmu = gpu_rd(cc, 0x1098), cxo = gpu_rd(cc, 0x109c);
++	printf("RAPHAEL GPU: GPUCC cx=%#x gx=%#x ahb=%#x gmu=%#x cxo=%#x\n", cx, gx, ahb, gmu, cxo);
++	printf("RAPHAEL GPU: GMU RCG=%#x/%#x CX_HW=%#x GX_CLAMP=%#x\n",
++	    gpu_rd(cc, 0x1120), gpu_rd(cc, 0x1124), gpu_rd(cc, 0x1540), gpu_rd(cc, 0x1508));
++	/* GDSCR PWR_ON is bit31. GCC/GPUCC offsets are from SM8150 Linux. */
++	if ((cx & (1u << 31)) && gpu_clock_live(ahb) && gpu_clock_live(gmu) && gpu_clock_live(cxo)) {
++		vm_offset_t m = ml_io_map(0x02c68000, 0x34000);
++		if (m) {
++			/* KGSL indices are relative to GPU base; GMU starts at index1a800. */
++			m += 0x2000;
++			printf("RAPHAEL GPU: GMU reset=%#x init=%#x busy=%#x power=%#x retention=%#x\n",
++			    gpu_rd(m, 0x14000), gpu_rd(m, 0x14070), gpu_rd(m, 0x14068),
++			    gpu_rd(m, 0x14340), gpu_rd(m, 0x14730));
++		}
++	} else {
++		printf("RAPHAEL GPU: GMU skipped: CX or required clocks off\n");
++	}
++	if ((gx & (1u << 31)) && (cx & (1u << 31)) && gpu_clock_live(ahb)) {
++		vm_offset_t gpu = ml_io_map(0x02c00000, 0x40000);
++		if (gpu) {
++			printf("RAPHAEL GPU: RBBM status=%#x/%#x CP rptr=%#x wptr=%#x SQE=%#x:%#x\n",
++			    gpu_rd(gpu, 0x840), gpu_rd(gpu, 0x84c), gpu_rd(gpu, 0x2018),
++			    gpu_rd(gpu, 0x201c), gpu_rd(gpu, 0x20c4), gpu_rd(gpu, 0x20c0));
++		}
++	} else {
++		printf("RAPHAEL GPU: GX skipped: power or AHB off\n");
++	}
++	if ((cx & (1u << 31)) && gpu_clock_live(ahb) && gpu_clock_live(mem) && gpu_clock_live(gpu_rd(gcc, 0x71018))) {
++		vm_offset_t s = ml_io_map(0x02ca0000, 0x10000);
++		if (s) {
++			printf("RAPHAEL GPU: SMMU sCR0=%#x IDR0=%#x IDR1=%#x IDR2=%#x\n",
++			    gpu_rd(s, 0), gpu_rd(s, 0x20), gpu_rd(s, 0x24), gpu_rd(s, 0x28));
++		}
++	} else {
++		printf("RAPHAEL GPU: SMMU skipped: CX or bus clocks off\n");
++	}
++	printf("RAPHAEL GPU: snapshot done; no GPU writes, no accelerator advertised\n");
++}
++#endif
