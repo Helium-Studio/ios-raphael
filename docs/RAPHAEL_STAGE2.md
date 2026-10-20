@@ -49,15 +49,16 @@ partition sizes. Keep USB attached during the root flash. With the phone in
 Bootloader and after the required backup/authorization:
 
 ```sh
-fastboot -S 512M flash userdata ios16-root-20H392-raphael-v1.simg
 fastboot flash boot shim/out/raphael-stage2.img
+fastboot -S 512M flash userdata ios16-root-20H392-raphael-v1.simg
 fastboot reboot
 ```
 
 The user explicitly requested boot-partition installation for this stage;
 Recovery, bootloaders, modem, persist, vbmeta and GPT remain intact. On this
 WSL host use Windows fastboot with Windows-accessible file paths and the
-verified device selected explicitly. If ABL stops responding after the large
+verified device selected explicitly. Install boot before the large root
+transfer to avoid another download if ABL hangs afterward. If ABL stops responding after the large
 flash, return to Bootloader manually before the next operation. Do not infer
 success from a stalled command or keep retrying against a hung bootloader.
 
