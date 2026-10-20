@@ -189,7 +189,8 @@ def build(seed=None, qemu=False, highmem=False, raphael_stage1=False):
 
     fbcon = node('sweet-fbcon', [
         ph(),
-        ('reg', u64(FB, 0x2400000 if raphael_stage1 else FB_SIZE)),
+        # The 36 MiB splash reservation exceeds the early I/O map's first L2.
+        ('reg', u64(FB, (FB_STRIDE * 2340 + 0x3fff) & ~0x3fff if raphael_stage1 else FB_SIZE)),
         ('width', u32(FB_W)),
         ('height', u32(2340 if raphael_stage1 else FB_H)),
         ('stride', u32(FB_STRIDE)),

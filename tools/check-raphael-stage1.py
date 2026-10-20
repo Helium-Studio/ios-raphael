@@ -33,6 +33,8 @@ def check(image):
     assert len(nodes['cpus'].children) == 1, 'stage one must be single-core'
     assert [c.name for c in nodes['arm-io'].children] == ['gic'], 'unexpected hardware drivers'
     assert nodes['sweet-fbcon'].prop('height') == struct.pack('<I', 2340)
+    fb_phys, fb_size = struct.unpack('<2Q', nodes['sweet-fbcon'].prop('reg'))
+    assert fb_phys == 0x9c000000 and 1080 * 2340 * 4 <= fb_size <= 0x2000000, 'framebuffer must fit the early I/O aperture'
     args = shlex.split(payload[0x48:0x2a8].split(b'\0')[0].decode())
     pairs = [arg.split('=', 1) for arg in args if '=' in arg]
     assert len({key for key, _ in pairs}) == len(pairs), 'ambiguous duplicate boot arguments'

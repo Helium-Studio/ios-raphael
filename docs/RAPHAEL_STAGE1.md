@@ -10,6 +10,8 @@ Hardware reference: `$HOME/kernel/zundamon_raphael`, branch
 are needed.
 
 - Framebuffer: `0x9c000000`, 1080x2340, stride 4320, BGRA, reservation 36 MiB.
+  The console maps only the visible pixels, rounded to 16 KiB; mapping the
+  entire reservation crosses an unpopulated early I/O L2 table and panics.
 - Panel: Samsung EA8076 command mode. The shim retains ABL's configuration;
   when PP0 tear-check is enabled it enables one-frame autorefresh and starts
   CTL0. Register offsets come from the reference tree's SDE driver.
