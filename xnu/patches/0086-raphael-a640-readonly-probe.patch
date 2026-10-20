@@ -28,7 +28,7 @@
  
 --- /dev/null
 +++ b/bsd/dev/sweet_gpu.c
-@@ -0,0 +1,104 @@
+@@ -0,0 +1,107 @@
 +/*
 + * Raphael A640 bring-up snapshot. MMIO reads only; never start DMA or publish
 + * IOAcceleratorES until the command processor and userspace backend work.
@@ -94,12 +94,15 @@
 +	vm_offset_t cc = ml_io_map(0x02c90000, 0xc000);
 +	if (!cc) { printf("RAPHAEL GPU: GPUCC map failed\n"); return; }
 +	uint32_t cx = gpu_rd(cc, 0x106c), gx = gpu_rd(cc, 0x100c);
++	uint32_t cx_hw = gpu_rd(cc, 0x1540), gx_cfg = gpu_rd(cc, 0x1010), clamp = gpu_rd(cc, 0x1508);
++	bool cx_on = (cx & cx_hw & (1u << 31)) != 0;
++	bool gx_on = (gx_cfg & (1u << 16)) && !(gx_cfg & (1u << 15)) && !(clamp & 0x11u);
 +	uint32_t ahb = gpu_rd(cc, 0x1078), gmu = gpu_rd(cc, 0x1098), cxo = gpu_rd(cc, 0x109c);
 +	printf("RAPHAEL GPU: GPUCC cx=%#x gx=%#x ahb=%#x gmu=%#x cxo=%#x\n", cx, gx, ahb, gmu, cxo);
-+	printf("RAPHAEL GPU: GMU RCG=%#x/%#x CX_HW=%#x GX_CLAMP=%#x\n",
-+	    gpu_rd(cc, 0x1120), gpu_rd(cc, 0x1124), gpu_rd(cc, 0x1540), gpu_rd(cc, 0x1508));
-+	/* GDSCR PWR_ON is bit31. GCC/GPUCC offsets are from SM8150 Linux. */
-+	if ((cx & (1u << 31)) && gpu_clock_live(ahb) && gpu_clock_live(gmu) && gpu_clock_live(cxo)) {
++	printf("RAPHAEL GPU: GMU RCG=%#x/%#x CX_HW=%#x GX_CFG=%#x GX_CLAMP=%#x\n",
++	    gpu_rd(cc, 0x1120), gpu_rd(cc, 0x1124), cx_hw, gx_cfg, clamp);
++	/* Linux polls CX HW_CTRL bit31 and GX CFG_GDSCR bit16, not requests. */
++	if (cx_on && gpu_clock_live(ahb) && gpu_clock_live(gmu) && gpu_clock_live(cxo)) {
 +		vm_offset_t m = ml_io_map(0x02c68000, 0x34000);
 +		if (m) {
 +			/* KGSL indices are relative to GPU base; GMU starts at index1a800. */
@@ -111,7 +114,7 @@
 +	} else {
 +		printf("RAPHAEL GPU: GMU skipped: CX or required clocks off\n");
 +	}
-+	if ((gx & (1u << 31)) && (cx & (1u << 31)) && gpu_clock_live(ahb)) {
++	if (gx_on && cx_on && gpu_clock_live(ahb)) {
 +		vm_offset_t gpu = ml_io_map(0x02c00000, 0x40000);
 +		if (gpu) {
 +			printf("RAPHAEL GPU: RBBM status=%#x/%#x CP rptr=%#x wptr=%#x SQE=%#x:%#x\n",
@@ -121,7 +124,7 @@
 +	} else {
 +		printf("RAPHAEL GPU: GX skipped: power or AHB off\n");
 +	}
-+	if ((cx & (1u << 31)) && gpu_clock_live(ahb) && gpu_clock_live(mem) && gpu_clock_live(gpu_rd(gcc, 0x71018))) {
++	if (cx_on && gpu_clock_live(ahb) && gpu_clock_live(mem) && gpu_clock_live(gpu_rd(gcc, 0x71018))) {
 +		vm_offset_t s = ml_io_map(0x02ca0000, 0x10000);
 +		if (s) {
 +			printf("RAPHAEL GPU: SMMU sCR0=%#x IDR0=%#x IDR1=%#x IDR2=%#x\n",

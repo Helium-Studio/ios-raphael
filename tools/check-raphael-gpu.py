@@ -58,12 +58,18 @@ int main(void) {
     assert(gpu_clock_live(1) && gpu_clock_live(0x80000003));
     assert(!gpu_clock_live(0) && !gpu_clock_live(0x80000001) && !gpu_clock_live(0x80000002));
     cc[0x106c/4]=1u<<31; cc[0x1078/4]=cc[0x1098/4]=cc[0x109c/4]=1;
+    maps=0; sweet_gpu_probe(); assert(maps==2); /* request is not CX HW status */
+    cc[0x1540/4]=1u<<31;
     maps=0; sweet_gpu_probe(); assert(maps==3); /* CX only */
     cc[0x100c/4]=1u<<31; gcc[0x7100c/4]=gcc[0x71018/4]=1;
+    maps=0; sweet_gpu_probe(); assert(maps==4); /* GX request is not completion */
+    cc[0x1010/4]=1u<<16; cc[0x1508/4]=1;
+    maps=0; sweet_gpu_probe(); assert(maps==4); /* GX I/O still clamped */
+    cc[0x1508/4]=0;
     maps=0; sweet_gpu_probe(); assert(maps==5); /* all banks */
     /* MMIO banks must retain their exact values: no writes or DMA setup. */
     for(unsigned i=0;i<sizeof(gcc)/4;i++)assert(gcc[i]==(i==0x71004/4 || i==0x7100c/4 || i==0x71018/4 ? 1u : 0u));
-    for(unsigned i=0;i<sizeof(cc)/4;i++)assert(cc[i]==(i==0x106c/4 || i==0x100c/4 ? 1u<<31 : i==0x1078/4 || i==0x1098/4 || i==0x109c/4 ? 1u : 0u));
+    for(unsigned i=0;i<sizeof(cc)/4;i++)assert(cc[i]==(i==0x106c/4 || i==0x100c/4 || i==0x1540/4 ? 1u<<31 : i==0x1010/4 ? 1u<<16 : i==0x1078/4 || i==0x1098/4 || i==0x109c/4 ? 1u : 0u));
     for(unsigned i=0;i<sizeof(gmu)/4;i++)assert(!gmu[i]);
     for(unsigned i=0;i<sizeof(gpu)/4;i++)assert(!gpu[i]);
     for(unsigned i=0;i<sizeof(smmu)/4;i++)assert(!smmu[i]);
