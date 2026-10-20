@@ -75,7 +75,7 @@ fastboot boot shim/out/raphael-stage3.img
 | 优先级 | 差异 | 后续动作 |
 | --- | --- | --- |
 | 紧接触控 | sweet 音量上为 PM6150L SID4/GPIO2；raphael 为 PM8150 SID0/GPIO6，电源/音量下走PON | 重查 SPMI APID/ownership，先只读验证再启用 keys；不能只把 sweetkeys 改1 |
-| 启动与交互性能 | sweet 为6×A55+2×A76；raphael 为4×A55+3×A76+1×A76 Prime | 当前1CPU已验证。先适配并验证4个A55，再处理大核、拓扑、IPI、缓存与频率；不要复制 sweet 的6小核假设 |
+| 启动与交互性能 | sweet 为6×A55+2×A76；raphael 为4×A55+3×A76+1×A76 Prime | 1/4/8核已逐步通过锁屏、触控及每核SGI1启动验证；DVFS、性能拓扑和休眠仍待适配，不能复制 sweet 的6小核假设 |
 | 调试/联网 | DWC3地址同为a600000，但 raphael USB2 PHY 是7nm SNPS HS PHY，sweet 为QUSB2；GCC及DMA/SMMU关系要核实 | 保持sweetusb=0。先核对控制器状态/时钟/PHY/DMA，再复用ECM前端 |
 | 显示与功耗 | raphael EA8076 command-mode，物理高度2340 | 当前借用ABL面板并启用PP autorefresh已可显示；后续补DSI/DPU时钟、真正亮灭屏、TE/vsync及休眠恢复 |
 | 电池/充电 | PM6150系列换成PM8150/PM8150B/PM8150L，fuel-gauge/charger寄存器与SID不同 | 保留静态电量；单独移植读取/校准及充电、温控，不启用旧真实电量路径 |
@@ -106,7 +106,10 @@ Recovery确认PM8150 SID0/GPIO6的c510=01、c505=11、c540=00、c546=80。
 CPU的Recovery实测MIDR为0–3:51df805e、4–7:51df804e。
 提供1/4/8CPU配置，先验证4个A55，再验证4A55+3A76+1Prime；继续使用现有PSCI、
 GICv3和SGI1启动框架。每核在0085记录MIDR，以启动日志中CPU_ON、SGI和8/8初始化完成为证据，
-并检查随后GUI/触控/按键。一个同构SMP集群暂不反映核心性能差异，未实现DVFS或系统休眠。
+并检查随后GUI/触控/按键。0084八核探针已获用户确认锁屏与触控正常，
+持久日志记录CPU1–7的PSCI返回0、MPIDR0..700全部上线、8/8初始化及每核SGI1通过。
+0085八核＋按键镜像已临时启动，按键实测待完成。一个同构SMP集群暂不反映核心性能差异，
+未实现DVFS或系统休眠。
 
 ```sh
 # KERNEL需包含0085；先把--cpus设为4完成过渡验证，再测8。
