@@ -71,7 +71,7 @@
 +static bool
 +gpu_clock_live(uint32_t cbcr)
 +{
-+	return (cbcr & 1u) && (!(cbcr & (1u << 31)) || (cbcr & 2u));
++	return cbcr != 0xffffffffu && (cbcr & 1u) && (!(cbcr & (1u << 31)) || (cbcr & 2u));
 +}
 +
 +void
@@ -95,7 +95,7 @@
 +	if (!cc) { printf("RAPHAEL GPU: GPUCC map failed\n"); return; }
 +	uint32_t cx = gpu_rd(cc, 0x106c), gx = gpu_rd(cc, 0x100c);
 +	uint32_t cx_hw = gpu_rd(cc, 0x1540), gx_cfg = gpu_rd(cc, 0x1010), clamp = gpu_rd(cc, 0x1508);
-+	bool cx_on = (cx & cx_hw & (1u << 31)) != 0;
++	bool cx_on = cx != 0xffffffffu && cx_hw != 0xffffffffu && (cx & cx_hw & (1u << 31)) != 0;
 +	bool gx_on = (gx_cfg & (1u << 16)) && !(gx_cfg & (1u << 15)) && !(clamp & 0x11u);
 +	uint32_t ahb = gpu_rd(cc, 0x1078), gmu = gpu_rd(cc, 0x1098), cxo = gpu_rd(cc, 0x109c);
 +	printf("RAPHAEL GPU: GPUCC cx=%#x gx=%#x ahb=%#x gmu=%#x cxo=%#x\n", cx, gx, ahb, gmu, cxo);

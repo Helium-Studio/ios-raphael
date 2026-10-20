@@ -56,7 +56,7 @@ int main(void) {
     maps=0; gcc[0x71004/4]=1;
     sweet_gpu_probe(); assert(maps==2); /* CX/GX off: neither GMU nor GPU/SMMU */
     assert(gpu_clock_live(1) && gpu_clock_live(0x80000003));
-    assert(!gpu_clock_live(0) && !gpu_clock_live(0x80000001) && !gpu_clock_live(0x80000002));
+    assert(!gpu_clock_live(0xffffffffu) && !gpu_clock_live(0) && !gpu_clock_live(0x80000001) && !gpu_clock_live(0x80000002));
     cc[0x106c/4]=1u<<31; cc[0x1078/4]=cc[0x1098/4]=cc[0x109c/4]=1;
     maps=0; sweet_gpu_probe(); assert(maps==2); /* request is not CX HW status */
     cc[0x1540/4]=1u<<31;
