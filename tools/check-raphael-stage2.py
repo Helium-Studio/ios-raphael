@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """Check a raphael boot image before deploying the userdata-backed iOS root."""
+import argparse
 import hashlib
 import shlex
 import struct
-import sys
 from pathlib import Path
 
 import adt
 
 
-def check(image):
+def check(image, touch=False):
     assert image[:8] == b'ANDROID!', 'not an Android boot image'
     kernel_size, _, ramdisk_size = struct.unpack_from('<3I', image, 8)
     page, version = struct.unpack_from('<2I', image, 36)
@@ -42,13 +42,18 @@ def check(image):
     assert len({key for key, _ in pairs}) == len(pairs), 'duplicate boot arguments'
     options = dict(pairs)
     required = dict(rd='ufsroot0', ufsroot='userdata', ufsrw='1', rootrw='1', cpus='1',
-                    sweetlog='1', sweetkeys='0', sweettouch='0', sweetusb='0',
+                    sweetlog='1', sweetkeys='0', sweettouch='1' if touch else '0', sweetusb='0',
                     sweetbattery='0', sweetfb_noconsole='1', ignition_level='1',
                     launchd_unsecure_cache='1')
     assert all(options.get(key) == value for key, value in required.items()), 'wrong root/write/driver arguments'
+    if touch:
+        assert options.get('sweettouchdelay') == '45', 'unexpected touch probe delay'
     return hashlib.sha256(image).hexdigest()
 
 
 if __name__ == '__main__':
-    path = Path(sys.argv[1])
-    print(f'PASS: raphael / userdata root enabled / writable / display; SHA256 {check(path.read_bytes())}')
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('image', type=Path)
+    parser.add_argument('--touch', action='store_true', help='require the stage-three touch test')
+    args = parser.parse_args()
+    print(f'PASS: raphael / userdata rw / display / touch={args.touch}; SHA256 {check(args.image.read_bytes(), args.touch)}')
