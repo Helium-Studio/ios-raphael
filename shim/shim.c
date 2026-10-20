@@ -158,7 +158,12 @@ void exc_handler(uint64_t slot, uint64_t *regs)
 	con_hex("X0", regs[0]);
 	con_hex("X1", regs[1]);
 	con_hex("X30", regs[29]);	/* stashed lr is just above the frame */
+#if defined(RAPHAEL_STAGE1)
+	for (;;)
+		__asm__ volatile("wfe");
+#else
 	reset(40);
+#endif
 }
 
 /* ---- SMP ---- */

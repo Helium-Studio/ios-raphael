@@ -25,7 +25,7 @@ def check(image):
     assert 'sweet-ufs' not in nodes, 'UFS must not be described'
     chosen = nodes['chosen']
     assert chosen.prop('no-storage') == struct.pack('<I', 1), 'missing storage interlock'
-    assert not next(c for c in chosen.children if c.name == 'memory-map').prop('RAMDisk'), 'stage one has no userland root'
+    assert next(c for c in chosen.children if c.name == 'memory-map').prop('RAMDisk') is None, 'stage one has no userland root'
     phys, size = struct.unpack_from('<2Q', payload, 0x38)
     assert (phys, size) == (0xb2000000, 0x1e000000), 'unexpected RAM aperture'
     assert chosen.prop('dram-base') == struct.pack('<Q', phys)
@@ -34,7 +34,9 @@ def check(image):
     assert [c.name for c in nodes['arm-io'].children] == ['gic'], 'unexpected hardware drivers'
     assert nodes['sweet-fbcon'].prop('height') == struct.pack('<I', 2340)
     args = shlex.split(payload[0x48:0x2a8].split(b'\0')[0].decode())
-    options = dict(arg.split('=', 1) for arg in args if '=' in arg)
+    pairs = [arg.split('=', 1) for arg in args if '=' in arg]
+    assert len({key for key, _ in pairs}) == len(pairs), 'ambiguous duplicate boot arguments'
+    options = dict(pairs)
     required = dict(rd='md0', cpus='1', ufsrw='0', rootrw='0', sweetlog='0',
                     sweetkeys='0', sweettouch='0', sweetusb='0', sweetbattery='0')
     assert all(options.get(key) == value for key, value in required.items()), 'unsafe boot arguments'
