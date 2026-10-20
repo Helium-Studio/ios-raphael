@@ -45,6 +45,7 @@ Linux 参考为 `$HOME/kernel/zundamon_raphael` 的 DTS、`gcc-sm8150.c`、
 验证：`tools/check-raphael-touch.py XNU_TREE` 对实际 C 解码函数执行 ASan/UBSan
 测试，覆盖0–10触点、抬起、镜像、截断、坏校验、重复ID及越界；两个修改文件本地
 arm64 Mach-O 交叉编译通过。CI0083：[39424091174](https://github.com/HeliumStudio-Dev/ios-raphael/actions/runs/39424091174)。
+CI 已通过（7分27秒），0083 已临时启动，正在等待触控实测。
 真机触控结果见 NOTES.md；构建成功本身不代表触控已验证。
 
 构建触控测试镜像（内核须包含0083）：
