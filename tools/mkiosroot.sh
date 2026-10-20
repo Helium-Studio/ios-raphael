@@ -50,10 +50,10 @@ guestfs=(sudo --preserve-env=SUPERMIN_KERNEL,SUPERMIN_MODULES,SUPERMIN_KERNEL_VE
 cleanup() {
 	local busy=0
 	for m in "${mounts[@]}"; do
-		if mountpoint -q "$m"; then
+		if sudo mountpoint -q "$m"; then
 			sudo umount "$m" 2>/dev/null || true
 		fi
-		mountpoint -q "$m" && busy=1
+		sudo mountpoint -q "$m" && busy=1
 	done
 	# Never recurse into a directory that is still mounted (the root is writable).
 	if [[ $busy == 0 ]]; then
