@@ -76,13 +76,17 @@ fastboot boot shim/out/raphael-stage3.img
 构建器要求保留已验证的输入/八核组合，检查器会拒绝缺少探测代码的旧内核。
 `tools/check-raphael-gpu.py XNU_TREE` 对实际 C 代码做 ASan/UBSan 测试，覆盖板型、
 截断 compatible、默认关闭、映射失败、时钟/电源门控、尚未完成的电源请求与 clamp，
-并检查模拟 MMIO 保持原值；本地 GPU/UFS 两个文件交叉编译通过。
+并检查模拟 MMIO 保持原值、全1无效状态被拒绝；本地 GPU/UFS 两个文件交叉编译通过。
 真机启动结果与 CI 信息持续记录在 `NOTES.md`，未获日志前不宣称探测通过。
 
 ## 接下来的通过条件
 
 按实际探测结果完成 A640 CX 电源、200MHz GMU 时钟、RPMh ARC/BCM 投票和 RSC/PDC；
 建立独立的4KiB GMU/GPU SMMU映射，处理16KiB CPU分配与缓存同步，不能使用 DMA bypass。
+主机上用上游 ArmSmmu4K 实际代码已将模拟16KiB分配映射成四个4KiB叶子，使用3个表页；
+这只证明软件布局可行，未证明真机分配/缓存/DMA正确。NativeAdreno中的CPU页号移位、
+BO分配取整、导入页所有权和页属性恢复仍需适配；不能只删除4KiB检查。
+A640 DT 没有 sheng 的 dma-coherent 声明，页表遍历一致性也必须单独验证。
 正确装入 A640 固件并取得真实 FW/HFI ACK 后，再做 SQE、ring、scratch write 与 fence。
 ZAP/PAS13 和非安全模式切换应参照 A640/Linux 与真机保留区，不能复用 sheng 的固件物理地址。
 
