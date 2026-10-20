@@ -16,6 +16,10 @@ Metal 插件、metal2vulkan/AIR 编译、Turnip 和显示交接；当前 iOS 根
 可参考其分层、真实 fence 验证和缓存同步方式，不能只改 compatible 或注册
 `IOAcceleratorES` 来宣称加速可用。后者还会让系统选择尚不能执行的 GPU 路径。
 
+实际20H392的Metal框架导出 `MTLAddDevice`，上游iOS17 accelerator基类头文件中的
+`sizeof(IOService)==136` 检查也在当前XNU8796头文件下交叉编译通过。
+这些是可行性证据，仍未审计完整vtable或装入原始IOGPUFamily父类，也未运行插件。
+
 | 项目 | NativeAdreno / sheng | raphael 实测与本地 Linux 参考 |
 | --- | --- | --- |
 | GPU | Adreno 740 / SM8550 | Adreno640v2，live DT chip ID `0x06040001` |

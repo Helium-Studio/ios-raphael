@@ -4,6 +4,8 @@
 
 ### >>> UPDATE 2026-10-20 (ACTIVE STAGE4: A640 GPU rendering attempt) <<<
 
+- **iOS16 frontend feasibility checked, notintegrated:** actual20H392sharedcacheMetalexports`MTLAddDevice`181a1b368 anddefaultdevicefunction;private`research/raphael-metal-symbols.txt`fromlocalipswtool. UpstreamOriginalAcceleratorABI.hIOService/IOAcceleratorESsizeof136assertpassesactualXNU8796headersarm64compile0/1fail (`research/compile-0086-abi.log`). Thisdoes**not**auditcompletevtable,loadoriginalIOGPUFamilyparentmetaclass,orprovepluginruntime. NoMetalplugin/IOAcceleratorESinstalledorpublished. Probe-onlytemporaryTUunderignoredresearchsourceforABIchecknotlistedinbuildconfig.
+
 - **FINAL0086 revision / pendinghardware:** source **3af6f55**,CI **39443279478** (watch`research/ci-0086c-watch.log`);rejectallonesCBCR/CXstatusbeforeinterpretingbits. HostASan/UBSanand2TUcrosscompilePASS. Previous634589fCI39442005985**success**(privatefullrunlog/result)butkernel**notbooted/superseded**;firstc1bb4b5run39441483618cancelled. Onlyuse3af6f55ornewerartifact. PhoneBootloaderconfirmed,nowaitingonphysicalactionuntilCIready.
 - **16K/4K research:** actualArmSmmu4K29f386ae corebuildtestedwitha modeledowned16KiBCPUallocation->four4KiBSMMUleaves,3tablepages,ASan/UBSanPASS (`research/raphael-smmu-16k-host.c`/`.log`). Software-only;noactualCPUallocation/DMA/cacheproof. Itshowsthegranulescanbedecoupledwithoutglobal4KXNUchange;NativeAdrenoCPUguard/cacheppnumshifts/BOallocationandimportownershipmustbeadaptedbeforeintegration. NativeSmmuContextassumescoherent_walk1fromshengDT;raphaelDTlacksdma-coherent,somustverifyIDR/SoCcoherencyorcleantables,notcopythatassumption.
 
