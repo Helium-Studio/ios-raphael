@@ -3,7 +3,11 @@
 
 #define FB_BASE		0x9c000000UL	/* reserved-memory cont_splash_region */
 #define FB_W		1080
+#if defined(RAPHAEL_STAGE1)
+#define FB_H		2340
+#else
 #define FB_H		2400
+#endif
 #define FB_STRIDE	(FB_W * 4)	/* a8r8g8b8, matches mainline simplefb */
 
 #define RED	0xffff0000U
@@ -15,6 +19,7 @@
 extern volatile uint32_t *con_fb;
 
 void con_clear(uint32_t bg);
+void con_display_start(void);
 void con_skip(void);
 void con_str(const char *label, const char *s);
 void con_hex(const char *label, uint64_t v);

@@ -377,11 +377,27 @@ void shim_main(uint64_t dtb)
 	/* An xnu payload in the ramdisk means: boot it (MMU stays off). */
 	stage = "loader";
 	con_clear(RED);
+#if defined(RAPHAEL_STAGE1)
+	con_str("SHIM", "raphael: RAM-only XNU stage 1");
+	con_display_start();
+	con_hex("EL", rsr("CurrentEL"));
+	con_hex("CNTFRQ", rsr("cntfrq_el0"));
+	con_hex("MMFR0", rsr("id_aa64mmfr0_el1"));
+	con_hex("MPIDR", rsr("mpidr_el1"));
+#else
 	con_str("SHIM", "sweet milestone 4: xnu loader");
+#endif
 	con_skip();
 	const char *why = loader_boot(dtb);
 	con_str("LOADER", why);
 	con_skip();
+
+#if defined(RAPHAEL_STAGE1)
+	/* A failed payload must never fall through into the UFS diagnostic. */
+	con_str("STAGE1", "no storage access; halted");
+	for (;;)
+		__asm__ volatile("wfe");
+#endif
 
 	/* No payload: probe the internal UFS while the MMU is still off. */
 	stage = "ufs";

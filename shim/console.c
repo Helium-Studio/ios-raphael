@@ -15,6 +15,24 @@ volatile uint32_t *con_fb = (volatile uint32_t *)FB_BASE;
 static uint32_t con_bg;
 static int row;
 
+void con_display_start(void)
+{
+#if defined(RAPHAEL_STAGE1) && defined(__aarch64__)
+	/* SM8150 SDE: keep ABL's command-mode pipeline refreshing, no panel reset. */
+	volatile uint32_t *pp = (volatile uint32_t *)0x0ae71000UL;
+	volatile uint32_t *ctl = (volatile uint32_t *)0x0ae02000UL;
+	con_hex("CTL_TOP", ctl[0x14 / 4]);
+	con_hex("PP_TE", pp[0]);
+	con_hex("PP_AUTO", pp[0x30 / 4]);
+	if (pp[0] & 1u) {
+		pp[0x30 / 4] = (1u << 31) | 1u;
+		__asm__ volatile("dsb sy" ::: "memory");
+		ctl[0x1c / 4] = 1;
+		__asm__ volatile("dsb sy" ::: "memory");
+	}
+#endif
+}
+
 void con_clear(uint32_t bg)
 {
 	for (int y = 0; y < FB_H; y++) {

@@ -1,0 +1,103 @@
+--- a/osfmk/arm/arm_init.c
++++ b/osfmk/arm/arm_init.c
+@@ -347,6 +347,7 @@
+ 	DTEntry chosen = NULL;
+ 	unsigned int dt_entry_size = 0;
+ 
++	sweet_early_set_height((uint32_t)args->Video.v_height);
+ 	sweet_early_mark(1, "arm_init entered (MMU on)");
+ 
+ 	arm_setup_pre_sign();
+--- a/osfmk/arm64/start.s
++++ b/osfmk/arm64/start.s
+@@ -515,7 +515,12 @@
+ 
+ #if defined(SWEET)
+ 	/* Stage 0: white 64x32 band, no stack or page tables needed. */
+-	MOV64	x0, (0x9c000000 + 2368 * 4320)
++	/* Boot_Video base/rowBytes/height: boot_args offsets 40/56/72. */
++	ldr		x0, [x20, #40]
++	ldr		x4, [x20, #56]
++	ldr		x2, [x20, #72]
++	sub		x2, x2, #32
++	madd	x0, x2, x4, x0
+ 	mov		w1, #-1
+ 	mov		x2, #32
+ 	mov		x4, #4320
+--- a/osfmk/arm64/sweet_early.c
++++ b/osfmk/arm64/sweet_early.c
+@@ -14,7 +14,8 @@
+ static volatile uint32_t *early_fb = (volatile uint32_t *)(uintptr_t)0x9c000000;
+ #define EARLY_FB early_fb
+ #define EARLY_WIDTH 1080u
+-#define EARLY_HEIGHT 2400u
++static unsigned int early_height = 2400u;
++#define EARLY_HEIGHT early_height
+ #define EARLY_STRIDE (4320u / 4)
+ #define EARLY_SCALE 2u
+ #define EARLY_CELL_W (8u * EARLY_SCALE)
+@@ -27,6 +28,14 @@
+ /* Initialized data must remain writable until disable, including panics. */
+ static unsigned int early_row, early_col;
+ static unsigned int early_started, early_disabled, early_panicking;
++
++void
++sweet_early_set_height(uint32_t height)
++{
++	if (height >= 64 && height <= 2400) {
++		early_height = height;
++	}
++}
+ 
+ static void
+ sweet_early_clear_row(void)
+--- a/osfmk/arm64/sweet_early.h
++++ b/osfmk/arm64/sweet_early.h
+@@ -7,12 +7,14 @@
+ #include <stdint.h>
+ 
+ #if defined(SWEET)
++void sweet_early_set_height(uint32_t height);
+ void sweet_early_mark(unsigned int stage, const char *label);
+ void sweet_early_putc(char c);
+ void sweet_early_panic(const char *fmt, va_list *args);
+ void sweet_early_relocate(uint64_t base);
+ void sweet_early_disable(void);
+ #else
++static inline void sweet_early_set_height(uint32_t height) { (void)height; }
+ static inline void sweet_early_mark(unsigned int stage, const char *label)
+ {
+ 	(void)stage;
+--- a/iokit/KernelConfigTables.cpp
++++ b/iokit/KernelConfigTables.cpp
+@@ -38,13 +38,13 @@
+     "   {"
+     "     'IOClass'         = SweetPlatformExpert;"
+     "     'IOProviderClass' = IOPlatformExpertDevice;"
+-    "     'IONameMatch'     = 'xiaomi,sweet';"
++    "     'IONameMatch'     = ('xiaomi,sweet', 'xiaomi,raphael');"
+     "     'IOProbeScore'    = 10000:32;"
+     "   },"
+     "   {"
+     "     'IOClass'         = SweetCPU;"
+     "     'IOProviderClass' = IOPlatformDevice;"
+-    "     'IONameMatch'     = 'qcom,kryo470';"
++    "     'IONameMatch'     = ('qcom,kryo470', 'qcom,kryo485');"
+     "     'IOProbeScore'    = 10000:32;"
+     "   },"
+     "   {"
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -592,6 +592,12 @@
+ 	char want[64] = "userdata";
+ 	int error;
+ 
++	/* Stage-one ports must not access storage, even with a wrong root boot-arg. */
++	if (SecureDTLookupEntry(NULL, "/chosen", &node) == kSuccess &&
++	    SecureDTGetProperty(node, "no-storage", (void const **)&reg, &size) == kSuccess) {
++		printf("SWEET UFS: storage disabled by device tree\n");
++		return ENXIO;
++	}
+ 	if (SecureDTLookupEntry(NULL, "/sweet-ufs", &node) != kSuccess ||
+ 	    SecureDTGetProperty(node, "reg", (void const **)&reg, &size) != kSuccess ||
+ 	    size < 2 * sizeof(uintptr_t)) {
