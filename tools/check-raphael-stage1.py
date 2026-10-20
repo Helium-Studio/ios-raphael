@@ -27,7 +27,7 @@ def check(image):
     assert chosen.prop('no-storage') == struct.pack('<I', 1), 'missing storage interlock'
     assert next(c for c in chosen.children if c.name == 'memory-map').prop('RAMDisk') is None, 'stage one has no userland root'
     phys, size = struct.unpack_from('<2Q', payload, 0x38)
-    assert (phys, size) == (0xb2000000, 0x1e000000), 'unexpected RAM aperture'
+    assert (phys, size) == (0x100000000, 0x20000000), 'unexpected RAM aperture'
     assert chosen.prop('dram-base') == struct.pack('<Q', phys)
     assert chosen.prop('dram-size') == struct.pack('<Q', size)
     assert len(nodes['cpus'].children) == 1, 'stage one must be single-core'

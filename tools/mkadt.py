@@ -17,8 +17,8 @@ MEM_SIZE = 0x4d000000
 # carve-out is in the low bank and the dynamic pools are limited below 4G.
 HIGH_PHYS_BASE = 0x100000000
 HIGH_MEM_SIZE = 0xfcc00000
-# raphael: leave ramoops at 0xb0000000 and the rmtfs/DFPS regions untouched.
-RAPHAEL_PHYS_BASE, RAPHAEL_MEM_SIZE = 0xb2000000, 0x1e000000
+# raphael live FDT: RAM skips 0xbcc00000..0xc0000000; use 512 MiB above 4G.
+RAPHAEL_PHYS_BASE, RAPHAEL_MEM_SIZE = 0x100000000, 0x20000000
 # /arm-io children are relative to this; it must not be 0 (serial_init bails)
 SOC_BASE = 0x01000000
 
