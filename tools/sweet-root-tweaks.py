@@ -41,6 +41,7 @@ def load(path):
 def save(path, data, uid, gid, mode, fmt=plistlib.FMT_BINARY):
     with open(path, 'wb') as f:
         plistlib.dump(data, f, fmt=fmt)
+        f.truncate()  # Some FUSE backends do not honor O_TRUNC; discard the old plist trailer.
     os.chown(path, uid, gid)
     os.chmod(path, mode)
 

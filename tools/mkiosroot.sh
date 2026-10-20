@@ -3,12 +3,13 @@
 # root filesystem plus its cryptexes, for the userdata partition (rd=ufsroot0).
 #
 #   mkiosroot.sh OS.dmg SYSTEMOS.dmg APPOS.dmg OUT.img [SIZE]     (SIZE default 16G)
+# MKIOSROOT_GUESTMOUNT=1 uses libguestfs when the host lacks an HFS+ driver.
 #
 # The IPSW images are raw APFS with LZBITMAP-compressed files: they are read
 # through apfs-fuse (decompressing), so the HFS+ copy is uncompressed. On a
 # device /private/preboot is its own volume holding the cryptexes, which
 # /System/Cryptexes/{OS,App} link to; here they live inside the one volume.
-# Owners, modes, symlinks and hard links are preserved (rsync -aH as root).
+# Owners, modes, symlinks and hard links are preserved (root rsync or tar).
 #
 # The volume is journaled (XNU replays the journal after a panic; Linux only
 # mounts it read-write with -o force and leaves the journal empty). SWEET
@@ -27,6 +28,11 @@ missing_tools=()
 for tool in apfs-fuse mkfs.hfsplus rsync; do
 	command -v "$tool" >/dev/null 2>&1 || missing_tools+=("$tool")
 done
+if [[ ${MKIOSROOT_GUESTMOUNT:-0} == 1 ]]; then
+	for tool in guestmount guestfish tar; do
+		command -v "$tool" >/dev/null 2>&1 || missing_tools+=("$tool")
+	done
+fi
 
 if [[ ${#missing_tools[@]} -gt 0 ]]; then
 	echo "Error: missing required host utilities: ${missing_tools[*]}" >&2
@@ -39,6 +45,8 @@ fi
 
 work=$(mktemp -d)
 mounts=()
+guest_pid=
+guestfs=(sudo --preserve-env=SUPERMIN_KERNEL,SUPERMIN_MODULES,SUPERMIN_KERNEL_VERSION,LIBGUESTFS_BACKEND,LIBGUESTFS_BACKEND_SETTINGS)
 cleanup() {
 	local busy=0
 	for m in "${mounts[@]}"; do
@@ -49,6 +57,7 @@ cleanup() {
 	done
 	# Never recurse into a directory that is still mounted (the root is writable).
 	if [[ $busy == 0 ]]; then
+		if [[ -n $guest_pid ]]; then sudo timeout 60 tail --pid="$guest_pid" -f /dev/null || true; fi
 		rm -f "$work"/*.dmg
 		rmdir "$work"/* "$work" 2>/dev/null || true
 	else
@@ -74,17 +83,34 @@ apfs_mount "$appos" appos
 truncate -s "$size" "$out"
 mkfs.hfsplus -s -J -v iOSRoot "$out"
 mkdir "$work/root"
-sudo mount -t hfsplus -o loop,force "$out" "$work/root"
 mounts=("$work/root" "${mounts[@]}")
+if [[ ${MKIOSROOT_GUESTMOUNT:-0} != 1 ]]; then
+	sudo mount -t hfsplus -o loop,force "$out" "$work/root"
+fi
 
 copy() {
 	echo "copying $1 -> ${2#"$work/root"}"
-	sudo mkdir -p "$2"
-	sudo rsync -aH --numeric-ids "$1/" "$2/"
+	if [[ ${MKIOSROOT_GUESTMOUNT:-0} == 1 ]]; then
+		local target=${2#"$work/root"}
+		target=${target:-/}
+		# Batch inside the appliance; per-file FUSE writes are very slow under TCG.
+		sudo tar --numeric-owner -cf - -C "$1" . |
+			"${guestfs[@]}" guestfish --rw --format=raw -a "$(realpath "$out")" \
+			-m /dev/sda:/:force mkdir-p "$target" : tar-in /dev/stdin "$target"
+	else
+		sudo mkdir -p "$2"
+		sudo rsync -aH --numeric-ids "$1/" "$2/"
+	fi
 }
 copy "$work/os/root" "$work/root"
 copy "$work/sysos/root" "$work/root/private/preboot/Cryptexes/OS"
 copy "$work/appos/root" "$work/root/private/preboot/Cryptexes/App"
+
+if [[ ${MKIOSROOT_GUESTMOUNT:-0} == 1 ]]; then
+	"${guestfs[@]}" guestmount --pid-file "$work/guestmount.pid" --format=raw -a "$(realpath "$out")" \
+		-m /dev/sda:/:force --rw -o allow_other "$work/root"
+	guest_pid=$(cat "$work/guestmount.pid")
+fi
 
 # Shared cache where dyld looks at ignition level 1: hard links, no extra space.
 dsc=private/preboot/Cryptexes/OS/System/Library/Caches/com.apple.dyld
@@ -129,6 +155,10 @@ printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?>' \
 
 df -h "$work/root"
 sudo umount "$work/root"
+if [[ -n $guest_pid ]]; then
+	sudo timeout 60 tail --pid="$guest_pid" -f /dev/null
+	guest_pid=
+fi
 # Linux hfsplus decomposes some non-ASCII names (localized Shortcuts examples)
 # differently from Apple's tables; let fsck_hfs rewrite them, then verify.
 fsck.hfsplus -f -y "$out" | grep -v 'Illegal name' || true
