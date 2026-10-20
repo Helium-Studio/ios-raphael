@@ -95,3 +95,26 @@ fastboot boot shim/out/raphael-stage3.img
   重新启用复位诊断或增加XNU重启支持前必须修正。
 - `RAPHAEL_STAGE1` 宏也用于第二、三阶段，现有行为是板级显示选择及失败时禁止落入sweet UFS探测。
   名称需要整理，但它不限制XNU读userdata；真正的存储开关是ADT no-storage和ufsrw/rootrw。
+
+## 按键与8核推进（2026-10-20，实测状态见NOTES.md）
+
+0084持久日志已抓取：106次按下与106次松手，含底边滑动，未记录触控错误或kernel panic。
+Recovery确认PM8150 SID0/GPIO6的c510=01、c505=11、c540=00、c546=80。
+0085将音量上改为PPID0c5 / c510，沿用APID/ownership发现、只读observer访问和输入使能检查；
+电源与音量下仍读取PON0810，不写PMIC配置或中断状态。
+
+CPU的Recovery实测MIDR为0–3:51df805e、4–7:51df804e。
+提供1/4/8CPU配置，先验证4个A55，再验证4A55+3A76+1Prime；继续使用现有PSCI、
+GICv3和SGI1启动框架。每核在0085记录MIDR，以启动日志中CPU_ON、SGI和8/8初始化完成为证据，
+并检查随后GUI/触控/按键。一个同构SMP集群暂不反映核心性能差异，未实现DVFS或系统休眠。
+
+```sh
+# KERNEL需包含0085；先把--cpus设为4完成过渡验证，再测8。
+bash tools/build-raphael-stage2.sh KERNEL RAPHAEL_DTB --touch --keys --cpus 8
+python3 tools/check-raphael-stage2.py shim/out/raphael-stage3.img --touch --keys --cpus 8
+fastboot boot shim/out/raphael-stage3.img
+```
+
+`tools/check-raphael-keys.py XNU_TREE` 检查实际板型匹配与APID选择，
+`tools/check-raphael-smp.py` 检查MPIDR、频率分组、cache ID和配置隔离。
+这些主机检查不替代真机的按键、电源亮灭屏和全部CPU启动验证。

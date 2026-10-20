@@ -9,7 +9,9 @@ from pathlib import Path
 import adt
 
 
-def check(image, touch=False):
+def check(image, touch=False, keys=False, cpus=1):
+    assert cpus in (1, 4, 8), 'unsupported CPU bring-up profile'
+    assert touch or (not keys and cpus == 1), 'keys/SMP profiles must retain touch'
     assert image[:8] == b'ANDROID!', 'not an Android boot image'
     kernel_size, _, ramdisk_size = struct.unpack_from('<3I', image, 8)
     page, version = struct.unpack_from('<2I', image, 36)
@@ -31,8 +33,15 @@ def check(image, touch=False):
     assert (phys, size) == (0x100000000, 0xfcc00000), 'unexpected RAM aperture'
     assert chosen.prop('dram-base') == struct.pack('<Q', phys)
     assert chosen.prop('dram-size') == struct.pack('<Q', size)
-    assert len(nodes['cpus'].children) == 1, 'use one CPU until SMP is tested'
-    assert b'qcom,kryo485' in nodes['cpus'].children[0].prop('compatible').split(b'\0')
+    cpu_nodes = nodes['cpus'].children
+    assert len(cpu_nodes) == cpus, 'CPU tree and requested profile disagree'
+    for core, cpu in enumerate(cpu_nodes):
+        assert b'qcom,kryo485' in cpu.prop('compatible').split(b'\0')
+        assert cpu.prop('reg') == struct.pack('<I', core << 8), 'wrong MPIDR order'
+        assert cpu.prop('cluster-type') == struct.pack('<I', 0), 'expected homogeneous SMP'
+        if cpus != 1:
+            frequency = 1785600000 if core < 4 else 2419200000 if core < 7 else 2841600000
+            assert cpu.prop('clock-frequency') == struct.pack('<I', frequency), 'wrong Kryo 485 frequency metadata'
     assert nodes['sweet-fbcon'].prop('height') == struct.pack('<I', 2340)
     assert struct.unpack('<2Q', nodes['sweet-fbcon'].prop('reg')) == (0x9c000000, 0x9a4000)
     displays = [c for c in nodes['arm-io'].children if c.name == 'disp0']
@@ -41,8 +50,8 @@ def check(image, touch=False):
     pairs = [arg.split('=', 1) for arg in args if '=' in arg]
     assert len({key for key, _ in pairs}) == len(pairs), 'duplicate boot arguments'
     options = dict(pairs)
-    required = dict(rd='ufsroot0', ufsroot='userdata', ufsrw='1', rootrw='1', cpus='1',
-                    sweetlog='1', sweetkeys='0', sweettouch='1' if touch else '0', sweetusb='0',
+    required = dict(rd='ufsroot0', ufsroot='userdata', ufsrw='1', rootrw='1', cpus=str(cpus),
+                    sweetlog='1', sweetkeys='1' if keys else '0', sweettouch='1' if touch else '0', sweetusb='0',
                     sweetbattery='0', sweetfb_noconsole='1', ignition_level='1',
                     launchd_unsecure_cache='1')
     assert all(options.get(key) == value for key, value in required.items()), 'wrong root/write/driver arguments'
@@ -55,5 +64,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('image', type=Path)
     parser.add_argument('--touch', action='store_true', help='require the stage-three touch test')
+    parser.add_argument('--keys', action='store_true', help='require the raphael PM8150 key driver')
+    parser.add_argument('--cpus', type=int, choices=(1, 4, 8), default=1)
     args = parser.parse_args()
-    print(f'PASS: raphael / userdata rw / display / touch={args.touch}; SHA256 {check(args.image.read_bytes(), args.touch)}')
+    print(f'PASS: raphael / userdata rw / touch={args.touch} / keys={args.keys} / cpus={args.cpus}; SHA256 {check(args.image.read_bytes(), args.touch, args.keys, args.cpus)}')

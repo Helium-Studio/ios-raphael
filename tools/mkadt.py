@@ -2,9 +2,9 @@
 """Build the minimal Apple Device Tree that the SWEET xnu needs to boot.
 
 Only what the early boot path actually reads (see NOTES.md); every MMIO
-address comes from the sweet live FDT. Usage: mkadt.py OUT.adt [--dump] [--qemu] [--highmem] [--raphael-stage1 | --raphael]
+address comes from the sweet live FDT. Usage: mkadt.py OUT.adt [--dump] [--qemu] [--highmem] [--raphael-stage1 | --raphael] [--raphael-cpus 1|4|8]
 """
-import hashlib, os, struct, sys
+import argparse, hashlib, os, struct, sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import adt  # noqa: E402
@@ -70,10 +70,12 @@ def node(name, props=(), children=()):
     return n
 
 
-def build(seed=None, qemu=False, highmem=False, raphael_stage1=False, raphael=False):
+def build(seed=None, qemu=False, highmem=False, raphael_stage1=False, raphael=False, raphael_cpus=1):
     """qemu=True: same tree, but with QEMU virt's GIC addresses and CNTFRQ (tools/qemu-sweet.py)."""
     phys_base, mem_size = (HIGH_PHYS_BASE, HIGH_MEM_SIZE) if highmem else (PHYS_BASE, MEM_SIZE)
     is_raphael = raphael_stage1 or raphael
+    if raphael_cpus not in (1, 4, 8) or (raphael_cpus != 1 and not raphael):
+        raise ValueError('raphael CPU bring-up supports 1, 4 or 8 cores with --raphael')
     if is_raphael:
         if qemu or highmem or (raphael_stage1 and raphael):
             raise ValueError('choose one raphael profile; do not combine with --qemu or --highmem')
@@ -128,12 +130,16 @@ def build(seed=None, qemu=False, highmem=False, raphael_stage1=False, raphael=Fa
     if raphael_stage1:
         chosen.props.append(('no-storage', 0, u32(1)))
 
-    # SWEET SMP: all eight cores in physical-core order (0-5 Cortex-A55,
-    # 6-7 Cortex-A76), one homogeneous cluster. The kernel defaults to one
-    # and uses cpus=N to select an initial prefix (N <= 8).
+    # Physical order: sweet A55 0-5 / A76 6-7; raphael A55 0-3 / A76 4-7.
+    # shortcut: homogeneous SMP; add capacity scheduling with power management.
     # QEMU retains its original single-CPU tree: its MPIDRs differ from sweet.
     cpu_nodes = []
-    for core in range(1 if qemu or is_raphael else 8):
+    for core in range(raphael_cpus if raphael else 1 if qemu or raphael_stage1 else 8):
+        # Describes the measured maximum, does not program a CPU frequency.
+        if is_raphael:
+            frequency = 1785600000 if core < 4 else 2419200000 if core < 7 else 2841600000
+        else:
+            frequency = 2304000000 if core >= 6 else 1804800000
         cpu_nodes.append(node(f'cpu{core}', [
             ph(),
             ('device_type', cstr('cpu')),
@@ -148,7 +154,7 @@ def build(seed=None, qemu=False, highmem=False, raphael_stage1=False, raphael=Fa
             ('l3-cache-id', u32(0)),     # shared L3
             ('state', cstr('running' if core == 0 else 'stopped')),
             ('timebase-frequency', u32(timebase)),
-            ('clock-frequency', u32(2304000000 if core >= 6 else 1804800000)),
+            ('clock-frequency', u32(frequency)),
             ('bus-frequency', u32(100000000)),
             ('memory-frequency', u32(1866000000)),
             ('peripheral-frequency', u32(timebase)),
@@ -247,10 +253,16 @@ def build(seed=None, qemu=False, highmem=False, raphael_stage1=False, raphael=Fa
 
 
 if __name__ == '__main__':
-    root = build(qemu='--qemu' in sys.argv, highmem='--highmem' in sys.argv,
-                 raphael_stage1='--raphael-stage1' in sys.argv, raphael='--raphael' in sys.argv)
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('output')
+    for flag in ('qemu', 'highmem', 'raphael-stage1', 'raphael', 'dump'):
+        parser.add_argument('--' + flag, action='store_true')
+    parser.add_argument('--raphael-cpus', type=int, choices=(1, 4, 8), default=1)
+    args = parser.parse_args()
+    root = build(qemu=args.qemu, highmem=args.highmem,
+                 raphael_stage1=args.raphael_stage1, raphael=args.raphael, raphael_cpus=args.raphael_cpus)
     blob = adt.serialize(root)
-    open(sys.argv[1], 'wb').write(blob)
-    if '--dump' in sys.argv:
+    open(args.output, 'wb').write(blob)
+    if args.dump:
         adt.dump(adt.parse(blob)[0])
-    print(f'{sys.argv[1]}: {len(blob)} bytes', file=sys.stderr)
+    print(f'{args.output}: {len(blob)} bytes', file=sys.stderr)
