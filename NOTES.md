@@ -2,6 +2,14 @@
 
 ## Agent handoff / active work (2026-10-15, latest)
 
+### >>> UPDATE 2026-10-20 (repository / cross-device analysis only) <<<
+
+- User requested repository analysis and a route to other devices. Reviewed committed baseline `11da58b` (origin is Helium-Studio/ios-raphael); despite the directory/repo name, the code still targets **sweet / SM7150**, not raphael. Added `docs/PORTING.zh-CN.md` with architecture, reuse boundaries, exact board-specific touchpoints, staged bring-up and a conditional SM8150 comparison against Linux upstream DTS.
+- Source observations: patches now reach **0081**. README's 6-core/navigation limitations lag behind the 10-18 handoff and patches 0070/0071/0078. Commit `fdad0de` describes 0080 configd activity without a default route and adds Ethernet link-state reporting; **no post-0081 internet-success result was available in this checkout**. This analysis does not supersede the prior physical-device state below.
+- Validation: `PYTHONPYCACHEPREFIX=/tmp/ios-raphael-analysis-pycache python3 tools/validate-repo.py` **PASS** (81 patch names/header checks, 15 Python syntax checks, 7 shell syntax checks). ADT generation/round-trip/assert checks **PASS** for phone low RAM (8 CPUs, timer19), phone high RAM (8 CPUs, timer19), QEMU (1 CPU, timer27), including MPIDR/RAM/UFS-node selection. These do **not** prove patch application, a build or a boot.
+- Local limitations: no cross GCC, QEMU or llvm-nm; no kernel artifact, stock DTB or `research/ipsw-x/d22ap.adt`. `/product` missing warnings were expected during the structural ADT checks. **No CI run, kernel build, device boot, partition write or push performed.** Hardware results remain those recorded below; no device serials/dumps or Apple artifacts were added.
+- Next for a new port: establish the exact target and collect live FDT/DTBO, boot header, RAM/carve-outs, framebuffer/panel mode, touch/PMIC details and UFS geometry. Test shim/16K/timer and XNU single-core with a RAM root before any destructive root-image deployment. SM8150 compatibility is a source-based hypothesis, not a verified raphael port. The analysis document and this handoff are committed together; no kernel patch was changed.
+
 ### >>> UPDATE 2026-10-18 (read first, then the 10-17 handoff below) <<<
 
 **STATE at end of 2026-10-18 (evening):**
