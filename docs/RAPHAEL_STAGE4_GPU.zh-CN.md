@@ -246,6 +246,34 @@ Qualcomm 编码转换，并要求实际读回 TYPE=FAULT，之后才允许发布
 FORMAT 位与所有真实故障位，原始 FAULT 状态恢复，以及取消匹配/撤除/TLB 排空失败。
 五个翻译单元交叉编译通过；此时真机结果和转换特性仍待本轮合并测试验证。
 
+## 下一批电源和 HFI 输入核对
+
+本地6.12 `a6xx_gmu_rpmh_arc_votes_init()` 使用OPP level查command-db索引，
+把primary level、secondary index、primary index打包为32位值。
+已用固定版本的 `AdrenoHfiArcVotes()` 实际C代码及本机完整aux字节做ASan/UBSan检查：
+
+| 频率 | OPP level | HFI ARC vote |
+| --- | --- | --- |
+| GMU 200MHz | 64 | `0x00400202` |
+| GPU 257MHz | 128 | `0x00800204` |
+| GPU 345MHz | 192 | `0x00c00305` |
+| GPU 427MHz | 256 | `0x01000407` |
+| GPU 499.2MHz | 320 | `0x01400508` |
+| GPU 585MHz | 384 | `0x01800609` |
+
+这是软件生成检查，尚未下发投票或证明电压正确。GX speed bin仍需按实际熔丝筛选，
+表中不启用675MHz。不要把整个HFI打包值作为CPU侧ARC命令的data；后者只发送corner索引。
+本机未出现gmxc.lvl，GPU secondary使用mx.lvl；内核读取仍必须区分缺失与解析错误。
+
+另一个移植陷阱是6.12 `a640_build_bw_table()` 的固定CNOC地址
+`0x50034/0x5007c/0x5004c`：后两个未出现在本机command-db，
+第一个在本机是SH3，不能仅按A640型号复制此表。
+实际CN0是 `0x500a8`；MC0/SH0/ACV是 `0x50000/0x5003c/0x5000c`，
+对应VCD分别为0/1/11。必须按本机拓扑、aux单位、总线宽度和VCD提交边界重建。
+本地SM8150拓扑的GPU master有2通道、每通道32字节；不能把频率直接作为带宽票值。
+缓存路径同样不能只放开NativeAdreno的4KiB CPU检查：本机完整16KiB页所有权与4KiB叶子
+需要分别计算，CPU修改后clean、设备修改后invalidate，HFI队列发布和接收各需明确同步。
+
 ## 接下来的通过条件
 
 按实际探测结果完成 A640 CX 电源、200MHz GMU 时钟、RPMh ARC/BCM 投票和 RSC/PDC；
