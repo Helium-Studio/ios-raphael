@@ -127,6 +127,11 @@ bash tools/build-raphael-stage2.sh KERNEL RAPHAEL_DTB --touch --keys --cpus 8 --
 主机测试直接运行C实现，覆盖上电/时钟/掉电超时、映射失败、拒绝未知状态和控制位恢复；
 实际硬件能否上电及安全访问仍须用临时启动与持久日志验证。
 
+CI [39607750670](https://github.com/HeliumStudio-Dev/ios-raphael/actions/runs/39607750670)
+已通过（源码 `4360fb9`，7分10秒）。0087镜像于2026-10-21 21:34临时启动成功，
+SHA256为 `0b460ae3dac13c0dbafc1f1a2036a392667ab56fdd3ce3b55c7202cafc5ac3e7`。
+锁屏和CX测试日志尚待确认。
+
 ## 接下来的通过条件
 
 按实际探测结果完成 A640 CX 电源、200MHz GMU 时钟、RPMh ARC/BCM 投票和 RSC/PDC；
