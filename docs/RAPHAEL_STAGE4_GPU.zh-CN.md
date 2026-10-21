@@ -191,6 +191,31 @@ CI [39615436048](https://github.com/HeliumStudio-Dev/ios-raphael/actions/runs/39
 均write=1/restored=1且reset=1。XO、CX和父时钟投票全部恢复。
 这些验证了实际分配、软件页表遍历与时钟/TCM访问；尚未验证硬件翻译、DMA或GPU渲染。
 
+## 0090：合并固件装载与 SMMU 上下文测试
+
+同一 `--gpu-cx-test` 可增加 `--gmu-firmware /private/path/a640_gmu.bin`。
+构建器把私有固件放入临时ADT；构建器、镜像检查器和内核都核对37680字节及上述SHA256。
+固件不进入git，也不写入根文件系统；旧镜像及不带固件的测试仍可使用。
+
+一次启动中，在已验证的CX/200MHz门控后完成：
+
+1. 复用AdrenoFirmware解析器验证完整块布局，分配连续 `0x94000` 字节，逐个16KiB页核实物理所有权。
+2. 以32KiB表池构建5个4KiB表页、129个叶子，分别映射icache、dcache、dummy、log、HFI。
+   dummy只映射其所属16KiB CPU页的首个4KiB，不映射相邻数据；icache只读且可执行。
+3. 按Linux A640初始化两队列/120字节HFI表；保存完整ITCM/DTCM，装入全部固件块并读回，清理整个分配的缓存。
+4. 要求实际SMMU ID/全局fault策略匹配、全部上下文关闭、所有stream槽无效、GMU保持复位且GX已关闭并clamp。
+   暂时使用CB4/ASID5以及两个空闲槽，设置DT规定的ACTLR=0x303和SID4/5、mask0x400。
+   先核对关闭状态的完整寄存器，再启用上下文并核对路由；不改sCR0或其他上下文。
+5. 路由先设FAULT再撤除，关闭上下文并执行真正的TLBIALL/TLBSYNC；恢复原始上下文、路由和完整TCM。
+   若撤除、TLB排空或寄存器恢复不能确认，保留内存到重启，避免回收仍可能被引用的页表。
+
+主机ASan/UBSan测试运行实际C、解析/编码核心及本机私有固件，覆盖固件损坏/长度、
+分配失败、非连续物理页、已有stream/上下文、寄存器和路由写入失败、TCM写入失败、
+TLB排空/路由撤除失败时保留内存，以及整个时钟→装载→上下文→恢复链路。
+五个翻译单元本地arm64编译通过；ADT往返/坏固件拒绝、补丁重建和仓库结构检查通过。
+真机测试待完成。GMU全程保持复位，本轮仍不能证明硬件页表遍历、固件执行或GPU渲染。
+正式释放复位前还需完成RPMh ARC/BCM、RSC/PDC、DMA缓存属性和fault中断处理。
+
 ## 接下来的通过条件
 
 按实际探测结果完成 A640 CX 电源、200MHz GMU 时钟、RPMh ARC/BCM 投票和 RSC/PDC；

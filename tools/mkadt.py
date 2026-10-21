@@ -44,6 +44,12 @@ BOOT_MANIFEST_HASH = hashlib.sha384(b'sweet boot manifest').digest()
 #   tools/remotezip.py URL DeviceTree.d22ap.im4p DIR
 #   ipsw img4 im4p extract DIR/Firmware/all_flash/DeviceTree.d22ap.im4p -o d22ap.adt
 D22AP_ADT = os.path.join(os.path.dirname(os.path.abspath(__file__)), '../research/ipsw-x/d22ap.adt')
+RAPHAEL_GMU_SHA256 = '3ff0c02708bbe78641db887fa62f3a7f9337934d0c2ce0b961ef7c43172591d2'
+
+
+def validate_raphael_gmu(firmware):
+    if len(firmware) != 37680 or hashlib.sha256(firmware).hexdigest() != RAPHAEL_GMU_SHA256:
+        raise ValueError('expected the verified raphael a640_gmu.bin (37680 bytes)')
 
 
 def d22ap_product(path=D22AP_ADT):
@@ -70,10 +76,14 @@ def node(name, props=(), children=()):
     return n
 
 
-def build(seed=None, qemu=False, highmem=False, raphael_stage1=False, raphael=False, raphael_cpus=1):
+def build(seed=None, qemu=False, highmem=False, raphael_stage1=False, raphael=False, raphael_cpus=1, gmu_firmware=None):
     """qemu=True: same tree, but with QEMU virt's GIC addresses and CNTFRQ (tools/qemu-sweet.py)."""
     phys_base, mem_size = (HIGH_PHYS_BASE, HIGH_MEM_SIZE) if highmem else (PHYS_BASE, MEM_SIZE)
     is_raphael = raphael_stage1 or raphael
+    if gmu_firmware is not None:
+        if not raphael or raphael_stage1 or raphael_cpus != 8:
+            raise ValueError('GMU firmware requires --raphael --raphael-cpus 8')
+        validate_raphael_gmu(gmu_firmware)
     if raphael_cpus not in (1, 4, 8) or (raphael_cpus != 1 and not raphael):
         raise ValueError('raphael CPU bring-up supports 1, 4 or 8 cores with --raphael')
     if is_raphael:
@@ -234,6 +244,8 @@ def build(seed=None, qemu=False, highmem=False, raphael_stage1=False, raphael=Fa
             ('#address-cells', u32(2)), ('#size-cells', u32(2)),
         ], [chosen, defaults, cpus, arm_io, fbcon])
 
+    if gmu_firmware is not None:
+        chosen.props.append(('raphael-gmu-firmware', 0, gmu_firmware))
     product_props = d22ap_product()
     product = [node('product', [ph()] + product_props)] if product_props else []
 
@@ -258,9 +270,11 @@ if __name__ == '__main__':
     for flag in ('qemu', 'highmem', 'raphael-stage1', 'raphael', 'dump'):
         parser.add_argument('--' + flag, action='store_true')
     parser.add_argument('--raphael-cpus', type=int, choices=(1, 4, 8), default=1)
+    parser.add_argument('--gmu-firmware', help='verified private a640_gmu.bin, carried in the temporary ADT')
     args = parser.parse_args()
     root = build(qemu=args.qemu, highmem=args.highmem,
-                 raphael_stage1=args.raphael_stage1, raphael=args.raphael, raphael_cpus=args.raphael_cpus)
+                 raphael_stage1=args.raphael_stage1, raphael=args.raphael, raphael_cpus=args.raphael_cpus,
+                 gmu_firmware=open(args.gmu_firmware, 'rb').read() if args.gmu_firmware else None)
     blob = adt.serialize(root)
     open(args.output, 'wb').write(blob)
     if args.dump:

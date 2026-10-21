@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise the actual A640 probe and CX rollback with modeled MMIO (XNU_TREE)."""
+"""Exercise A640 gates/rollback (XNU_TREE [private a640_gmu.bin]); needs libcrypto headers."""
 from pathlib import Path
 import os
 import subprocess
@@ -12,13 +12,19 @@ for barrier in ('dmb oshst', 'dsb osh'):
     source = source.replace(f'__asm__ volatile("{barrier}" ::: "memory");', '')
 source = source.replace('*(volatile uint32_t *)(bank + off) = next;', 'model_write(bank, off, next);')
 source = source.replace('return *(const volatile uint32_t *)(bank + off);', 'return model_read(bank + off);')
+source = source.replace('*(volatile uint64_t *)(bank + off) = value;', 'model_write64(bank, off, value);')
+source = source.replace('return *(const volatile uint64_t *)(bank + off);', 'return (uint64_t)model_read(bank + off) | (uint64_t)model_read(bank + off + 4) << 32;')
 code = r'''
 #include <assert.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
+#include <openssl/sha.h>
 #include "ArmSmmu4K.h"
+#include "ArmSmmu4KContext.h"
+#include "AdrenoFirmware.h"
 typedef uintptr_t vm_offset_t;
 typedef uint32_t ppnum_t;
 typedef int kern_return_t;
@@ -44,23 +50,49 @@ static int model, power_fail, clock_fail, off_fail, gmu_failmap, log_secs=1, wri
 static int bus_fail, smmu_failmap, smmu_reads, context_reads;
 static int alloc_fail, physical_fail, allocated, cleaned, freed, rcg_fail, xo_fail, tcm_fail, tcm_writes;
 static _Alignas(16384) uint8_t arena[32768];
+static _Alignas(16384) uint8_t fw_arena[0x94000];
+static uint8_t *firmware;
+static unsigned firmware_bytes, firmware_present, firmware_cleaned, smmu_writes, tlbi_commands, retained;
+static uintptr_t allocation;
+static size_t allocation_bytes;
+static int context_bad_readback, context_bad_route, context_drain_fail, context_detach_fail, fw_tcm_fail;
 static kern_return_t kmem_alloc_contig(int map,uintptr_t *v,size_t n,uintptr_t mask,ppnum_t max,ppnum_t pmask,int flags,int tag) {
-    assert(map==kernel_map && n==sizeof(arena) && mask==PAGE_MASK && max==(((1ull<<40)-1)>>PAGE_SHIFT) && !pmask && flags==(KMA_DATA|KMA_ZERO) && tag==VM_KERN_MEMORY_IOKIT && !allocated);
+    assert(map==kernel_map && (n==sizeof(arena) || n==sizeof(fw_arena)) && mask==PAGE_MASK && max==(((1ull<<40)-1)>>PAGE_SHIFT) && !pmask && flags==(KMA_DATA|KMA_ZERO) && tag==VM_KERN_MEMORY_IOKIT && !allocated);
     if(alloc_fail)return 5;
-    *v=(uintptr_t)arena;memset(arena,0,sizeof(arena));allocated=1;return 0;
+    *v=n==sizeof(arena)?(uintptr_t)arena:(uintptr_t)fw_arena;
+    memset((void *)*v,0,n);allocation=*v;allocation_bytes=n;allocated=1;return 0;
 }
 static ppnum_t pmap_find_phys(int pmap,uintptr_t v) {
-    assert(pmap==kernel_pmap && allocated && (v==(uintptr_t)arena || v==(uintptr_t)arena+PAGE_SIZE));
-    return ((0x104000000ull+(v-(uintptr_t)arena))>>PAGE_SHIFT) ^ ((physical_fail && v!=(uintptr_t)arena) ? 8u : 0u);
+    assert(pmap==kernel_pmap && allocated && v>=allocation && v-allocation<allocation_bytes && !((v-allocation)&PAGE_MASK));
+    return ((0x104000000ull+v-allocation)>>PAGE_SHIFT) ^ ((physical_fail && v!=allocation) ? 8u : 0u);
 }
 static void clean_dcache64(uint64_t pa,size_t n,int phys) {
-    assert(allocated && pa==0x104000000ull && n==sizeof(arena) && phys==TRUE);
+    assert(allocated && pa==0x104000000ull && n==allocation_bytes && phys==TRUE);
+    if(n==sizeof(fw_arena)) {
+        uint32_t *hfi=(uint32_t *)(fw_arena+0x90000);
+        assert(hfi[1]==120 && hfi[4]==2 && hfi[5]==2 && hfi[7]==0x60009000 && hfi[19]==0x6000a000);
+        uint64_t *tables=(uint64_t *)fw_arena;
+        const uint64_t va[]={0x4000,0x44000,0x60000000,0x60004000,0x60008000};
+        const unsigned offsets[]={0x8000,0x44000,0x88000,0x8c000,0x90000}, sizes[]={0x3c000,0x3c000,0x1000,0x4000,0x4000};
+        for(unsigned r=0;r<5;r++)for(unsigned off=0;off<sizes[r];off+=4096) {
+            uint64_t addr=va[r]+off,at=0,entry=0;
+            for(unsigned level=1;level<=3;level++) {
+                entry=tables[at*512+((addr>>(39-9*level))&511)];
+                assert((entry&3)==3);uint64_t p=entry&0x0000fffffffff000ull;
+                if(level<3) {assert(p>=pa && p-pa<5*4096);at=(p-pa)/4096;}
+                else assert(p==pa+offsets[r]+off);
+            }
+            assert(!!(entry&(1u<<7))==(r==0));
+            assert(!!(entry&(3ull<<53))==(r!=0));
+        }
+        ++firmware_cleaned;return;
+    }
     const uint32_t *payload=(const uint32_t *)(arena+PAGE_SIZE);
     for(unsigned i=0;i<PAGE_SIZE/4;i++)assert(payload[i]==(0x64000000u^i));
     ++cleaned;
 }
 static void kmem_free(int map,uintptr_t v,size_t n) {
-    assert(map==kernel_map && v==(uintptr_t)arena && n==sizeof(arena) && allocated);allocated=0;++freed;
+    assert(map==kernel_map && v==allocation && n==allocation_bytes && allocated);allocated=0;++freed;
 }
 static const char *compatible;
 static unsigned length;
@@ -72,10 +104,21 @@ static int PE_parse_boot_argn(const char *k, void *v, int n) {
 }
 static void model_write(uintptr_t bank,unsigned off,uint32_t value) {
     assert(model);
+    if(bank>=(uintptr_t)smmu && bank-(uintptr_t)smmu<sizeof(smmu)) {
+        off+=(unsigned)(bank-(uintptr_t)smmu);
+        assert((off>=0xc000 && off<=0xc03c) || off==0x1010 || off==0x1810 || off==0xc618 || off==0xc7f0 || off==0x800 || off==0x804 || off==0xc00 || off==0xc04);
+        assert(gmu[0x16000/4]==1 && !(cc[0x100c/4]&(1u<<31)));
+        if(off==0xc618) {assert(value==0);++tlbi_commands;return;}
+        if(off==0xc7f0) {assert(value==0xffffffffu);return;}
+        if(context_bad_readback && off==0xc030 && value!=0) value^=1;
+        if(context_bad_route && off==0x800 && value==0x84000004u) value^=1;
+        if(context_detach_fail && off==0xc00 && value==(2u<<16) && smmu[off/4]==4)return;
+        smmu[off/4]=value;++smmu_writes;return;
+    }
     if(bank==(uintptr_t)gmu+0x2000) {
-        assert((off>=0x6fe0 && off<0x7000) || (off>=0xafe0 && off<0xb000));
-        assert((cc[0x1540/4]&(1u<<31)) && (cc[0x1124/4]&0x371f)==0x602 && gmu[0x16000/4]==1);
-        if(!(tcm_fail && off==0x6fe0 && value==0xa6400000u))gmu[(off+0x2000)/4]=value;
+        assert((off>=0x3000 && off<0xb000));
+        if(!((cc[0x1540/4]&(1u<<31)) && (cc[0x1124/4]&0x371f)==0x602 && gmu[0x16000/4]==1)) {fprintf(stderr,"bad TCM write off=%x HW=%x cfg=%x reset=%x drain=%d\n",off,cc[0x1540/4],cc[0x1124/4],gmu[0x16000/4],context_drain_fail);abort();}
+        if(!(tcm_fail && off==0x6fe0 && value==0xa6400000u) && !(fw_tcm_fail && off==0x3000 && value))gmu[(off+0x2000)/4]=value;
         ++tcm_writes;
     } else {
         assert(bank==(uintptr_t)cc || bank==(uintptr_t)gcc);
@@ -86,6 +129,9 @@ static void model_write(uintptr_t bank,unsigned off,uint32_t value) {
     }
     ++writes;
 }
+static void model_write64(uintptr_t bank,unsigned off,uint64_t value) {
+    model_write(bank,off,(uint32_t)value);model_write(bank,off+4,(uint32_t)(value>>32));
+}
 static uint32_t model_read(uintptr_t address) {
     uint32_t *banks[]={gcc,cc,gmu,gpu,smmu};
     size_t sizes[]={sizeof(gcc),sizeof(cc),sizeof(gmu),sizeof(gpu),sizeof(smmu)};
@@ -94,13 +140,14 @@ static uint32_t model_read(uintptr_t address) {
         uintptr_t base=(uintptr_t)banks[i];
         if(address>=base && address-base<sizes[i]) {
             if(i==4) {++smmu_reads; if(address-base>=0x800)++context_reads;}
+            if(i==4 && address-base==0xc7f4 && context_drain_fail)return 1;
             return *(uint32_t *)address;
         }
     }
     assert(0); return 0;
 }
 static int tsleep(void *channel,int priority,const char *name,int ticks) {
-    (void)channel; assert(priority==PZERO && (!strcmp(name,"gpucxlog") || !strcmp(name,"gpusmmulog") || !strcmp(name,"gmupreplog")) && ticks==3*hz); ++sleeps; return 0;
+    (void)channel; assert(priority==PZERO && (!strcmp(name,"gpucxlog") || !strcmp(name,"gpusmmulog") || !strcmp(name,"gmupreplog") || !strcmp(name,"gmufwlog") || !strcmp(name,"gmuctxlog")) && ticks==3*hz); ++sleeps; return 0;
 }
 static void delay(unsigned n) {
     (void)n; assert(++delays<10000);
@@ -124,7 +171,11 @@ static void delay(unsigned n) {
     else cc[0x1120/4]|=1u<<31;
 }
 static int SecureDTLookupEntry(void *a,const char *b,DTEntry *r) { (void)a; (void)b; *r=0; return missing; }
-static int SecureDTGetProperty(DTEntry r,const char *k,const void **p,unsigned *n) { (void)r; (void)k; *p=compatible; *n=length; return 0; }
+static int SecureDTGetProperty(DTEntry r,const char *k,const void **p,unsigned *n) {
+    (void)r;
+    if(!strcmp(k,"raphael-gmu-firmware")) {if(!firmware_present)return 1;*p=firmware;*n=firmware_bytes;return 0;}
+    assert(!strcmp(k,"compatible"));*p=compatible;*n=length;return 0;
+}
 static uintptr_t ml_io_map(uintptr_t address,uintptr_t bytes) {
     ++maps;
     if(failmap)return 0;
@@ -166,7 +217,15 @@ static void reset_cx(void) {
     cc[0x1120/4]=0x80000000;
     memcpy(saved,cc,sizeof(cc));
 }
-int main(void) {
+static void reset_fw(void) {
+    reset_cx();
+    cc[0x106c/4]=(cc[0x106c/4]&~1u)|(1u<<31);cc[0x1540/4]|=1u<<31;cc[0x1124/4]=0x602;cc[0x1120/4]=0;
+    smmu[0]=0x250406;smmu[0x20/4]=0x4c017e06;smmu[0x24/4]=0x20000005;smmu[0x28/4]=0x5555;smmu[0x800/4]=0;
+    firmware_cleaned=smmu_writes=tlbi_commands=0;
+    context_bad_readback=context_bad_route=context_drain_fail=context_detach_fail=fw_tcm_fail=0;
+    memcpy(saved_smmu,smmu,sizeof(smmu));
+}
+int main(int argc,char **argv) {
     compatible="D22AP\0xiaomi,raphael"; length=sizeof("D22AP\0xiaomi,raphael");
     sweet_gpu_probe(); assert(maps==0); /* opt-in */
     enabled=1; compatible="xiaomi,sweet"; length=sizeof("xiaomi,sweet");
@@ -259,6 +318,32 @@ int main(void) {
     for(unsigned i=0;i<sizeof(gmu)/4;i++)assert(gmu[i]==(i==0x16000/4 ? 1u : 0u));
     for(unsigned i=0;i<sizeof(gpu)/4;i++)assert(!gpu[i]);
     assert(!memcmp(saved_smmu,smmu,sizeof(smmu)));
+    if(argc==2) {
+        FILE *f=fopen(argv[1],"rb");assert(f);firmware=malloc(37680);assert(firmware);
+        assert(fread(firmware,1,37680,f)==37680 && fgetc(f)==EOF);fclose(f);
+        firmware_bytes=37680;firmware_present=1;
+        reset_fw();gpu_firmware_test((uintptr_t)smmu,(uintptr_t)gmu+0x2000);
+        assert(firmware_cleaned==1 && !allocated && freed==1 && smmu_writes>0 && tlbi_commands==2 && !memcmp(saved_smmu,smmu,sizeof(smmu)));
+        for(unsigned i=0;i<sizeof(gmu)/4;i++)assert(gmu[i]==(i==0x16000/4 ? 1u : 0u));
+        reset_fw();firmware[0]^=1;gpu_firmware_test((uintptr_t)smmu,(uintptr_t)gmu+0x2000);firmware[0]^=1;
+        assert(!allocated && !freed && !smmu_writes && !tcm_writes);
+        reset_fw();--firmware_bytes;gpu_firmware_test((uintptr_t)smmu,(uintptr_t)gmu+0x2000);++firmware_bytes;
+        assert(!freed && !smmu_writes);
+        reset_fw();alloc_fail=1;gpu_firmware_test((uintptr_t)smmu,(uintptr_t)gmu+0x2000);assert(!freed && !smmu_writes);
+        reset_fw();physical_fail=1;gpu_firmware_test((uintptr_t)smmu,(uintptr_t)gmu+0x2000);assert(freed==1 && !smmu_writes && !tcm_writes);
+        reset_fw();smmu[0x800/4]=0x80000007;gpu_firmware_test((uintptr_t)smmu,(uintptr_t)gmu+0x2000);assert(firmware_cleaned==1 && freed==1 && !smmu_writes);
+        reset_fw();smmu[0x9000/4]=1;gpu_firmware_test((uintptr_t)smmu,(uintptr_t)gmu+0x2000);assert(freed==1 && !smmu_writes);
+        reset_fw();context_bad_readback=1;gpu_firmware_test((uintptr_t)smmu,(uintptr_t)gmu+0x2000);assert(freed==1 && tlbi_commands==2 && !memcmp(saved_smmu,smmu,sizeof(smmu)));
+        reset_fw();context_bad_route=1;gpu_firmware_test((uintptr_t)smmu,(uintptr_t)gmu+0x2000);assert(freed==1 && !memcmp(saved_smmu,smmu,sizeof(smmu)));
+        reset_fw();fw_tcm_fail=1;gpu_firmware_test((uintptr_t)smmu,(uintptr_t)gmu+0x2000);assert(freed==1 && !smmu_writes);
+        reset_cx();smmu[0]=0x250406;smmu[0x20/4]=0x4c017e06;smmu[0x24/4]=0x20000005;smmu[0x28/4]=0x5555;smmu[0x800/4]=0;
+        memcpy(saved_smmu,smmu,sizeof(smmu));sweet_gpu_probe();
+        assert(firmware_cleaned && freed==2 && !allocated && !memcmp(saved_smmu,smmu,sizeof(smmu)) && !memcmp(saved,cc,sizeof(cc)));
+        reset_fw();context_detach_fail=1;gpu_firmware_test((uintptr_t)smmu,(uintptr_t)gmu+0x2000);assert(allocated && !freed);allocated=0;++retained;
+        reset_fw();context_drain_fail=1;gpu_firmware_test((uintptr_t)smmu,(uintptr_t)gmu+0x2000);assert(allocated && !freed && tlbi_commands==2);++retained;
+        /* Model teardown only: production keeps this allocation until reboot. */
+        allocated=0;free(firmware);
+    }
 }
 '''
 with tempfile.TemporaryDirectory(prefix='raphael-gpu-') as tmp:
@@ -266,6 +351,8 @@ with tempfile.TemporaryDirectory(prefix='raphael-gpu-') as tmp:
     c.write_text(code)
     dev = Path(sys.argv[1]) / 'bsd/dev'
     subprocess.run([os.environ.get('CC', 'cc'), '-Wall', '-Wextra', '-Werror',
-                    '-fsanitize=address,undefined', '-g', '-I', str(dev), str(c), str(dev / 'ArmSmmu4K.c'), '-o', str(exe)], check=True)
-    subprocess.run([str(exe)], check=True, stdout=subprocess.DEVNULL)
-print('PASS: A640 gates/rollback, SMMU geometry, owned 16K/4K tables, 200MHz/TCM restore and failure paths; no SMMU/GX/DMA writes (ASan/UBSan)')
+                    '-fsanitize=address,undefined', '-Wno-deprecated-declarations', '-g', '-I', str(dev), str(c),
+                    str(dev / 'ArmSmmu4K.c'), str(dev / 'ArmSmmu4KContext.c'), str(dev / 'AdrenoFirmware.c'),
+                    '-lcrypto', '-o', str(exe)], check=True)
+    subprocess.run([str(exe), *sys.argv[2:]], check=True, stdout=subprocess.DEVNULL)
+print('PASS: A640 gates/rollback and owned tables; optional firmware fixture exercises load/CB4/routes/drain/retention (ASan/UBSan)')

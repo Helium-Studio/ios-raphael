@@ -7,6 +7,7 @@ import struct
 from pathlib import Path
 
 import adt
+from mkadt import validate_raphael_gmu
 
 
 def check(image, touch=False, keys=False, cpus=1, gpu=False):
@@ -33,6 +34,11 @@ def check(image, touch=False, keys=False, cpus=1, gpu=False):
     assert b'xiaomi,raphael' in root.prop('compatible').split(b'\0'), 'wrong board'
     assert 'product' in nodes and len(nodes['product'].props) > 50, 'missing d22ap identity'
     chosen = nodes['chosen']
+    firmware = chosen.prop('raphael-gmu-firmware')
+    if firmware is not None:
+        assert gpu == 2, 'firmware requires the gated CX test'
+        assert b'RAPHAEL GPU: firmware batch begin;' in payload, 'kernel lacks the firmware preparation batch'
+        validate_raphael_gmu(firmware)
     assert chosen.prop('no-storage') is None, 'storage interlock still present'
     assert struct.unpack('<2Q', nodes['sweet-ufs'].prop('reg')) == (0x1d84000, 0x3000)
     phys, size = struct.unpack_from('<2Q', payload, 0x38)
