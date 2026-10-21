@@ -154,6 +154,11 @@ GCC memnoc/dvm及GPUCC AHB时钟均启用时才访问SMMU；不尝试开启共�
 不清故障、不写路由/上下文、不复位SMMU、不使用DMA bypass。
 主机ASan/UBSan覆盖有效及畸形几何、时钟/复位门控、映射失败与恢复；真机结果待验证。
 
+CI [39611757924](https://github.com/HeliumStudio-Dev/ios-raphael/actions/runs/39611757924)
+已通过，源码 `bcfdce1`；0088于2026-10-21 22:02临时启动，镜像SHA256为
+`d9b8446591f8a15838ddf4ad5f17baab2627afd424b1d802acd0a03a29ba315b`。
+fastboot发送/启动成功，锁屏和SMMU持久日志尚待确认。
+
 ## 接下来的通过条件
 
 按实际探测结果完成 A640 CX 电源、200MHz GMU 时钟、RPMh ARC/BCM 投票和 RSC/PDC；
