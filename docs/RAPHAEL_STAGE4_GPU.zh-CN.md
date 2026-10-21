@@ -233,6 +233,19 @@ corner表的索引，须逐项匹配电压等级；现有L11C的VRM毫伏/模式
 实际apps-RSC的地址、DRV2及ACTIVE2/SLEEP3/WAKE3布局与现有传输层一致，
 可复用其空闲TCS检查、锁、完成确认和超时隔离；须扩展资源解析及命令格式。
 
+## 0091：修正 FSR 判断及 Qualcomm FAULT 写入
+
+故障判断改用 Linux 的 `FSR_FAULT=0xc00001fe`，允许正常的 `FORMAT=0x400`。
+只有确认无效且独占的 stream 槽才尝试 FAULT；若读回未生效，尝试 Linux 记录的
+Qualcomm 编码转换，并要求实际读回 TYPE=FAULT，之后才允许发布路由。
+撤除先取消并核实 SMR，再隔离到 FAULT，避免转换探测留下有效的 BYPASS 路由。
+恢复同样处理原始 FAULT 编码，逐字段核对，失败继续保留页表内存。
+日志增加首次/实际 S2CR 值、转换分支及每条路由的原始/当前 SMR/S2CR。
+
+实际 C 的 ASan/UBSan 检查覆盖正常、转换和不支持转换三种硬件行为，
+FORMAT 位与所有真实故障位，原始 FAULT 状态恢复，以及取消匹配/撤除/TLB 排空失败。
+五个翻译单元交叉编译通过；此时真机结果和转换特性仍待本轮合并测试验证。
+
 ## 接下来的通过条件
 
 按实际探测结果完成 A640 CX 电源、200MHz GMU 时钟、RPMh ARC/BCM 投票和 RSC/PDC；

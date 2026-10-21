@@ -1,0 +1,95 @@
+--- a/bsd/dev/sweet_gpu.c
++++ b/bsd/dev/sweet_gpu.c
+@@ -223,13 +223,40 @@
+ }
+ 
+ static bool
++gpu_stream_fault(vm_offset_t s, unsigned slot)
++{
++	/* Linux qcom_smmu_write_s2cr: TZ may drop FAULT and convert BYPASS to FAULT.
++	 * Test only an invalid, exclusively owned slot; never publish a bypass route. */
++	if (gpu_rd(s, 0x800 + 4 * slot) & (1u << 31)) { return false; }
++	gpu_wr(s, 0xc00 + 4 * slot, 2u << 16);
++	uint32_t first = gpu_rd(s, 0xc00 + 4 * slot);
++	bool quirk = first != 0xffffffffu && (first & (3u << 16)) != (2u << 16);
++	if (quirk) { gpu_wr(s, 0xc00 + 4 * slot, (1u << 16) | 0xffu); }
++	uint32_t actual = gpu_rd(s, 0xc00 + 4 * slot);
++	bool faulted = actual != 0xffffffffu && (actual & (3u << 16)) == (2u << 16);
++	printf("RAPHAEL GPU: slot%u faulted=%u quirk=%u first=%#x actual=%#x\n", slot, faulted, quirk, first, actual);
++	return faulted;
++}
++
++static bool
++gpu_stream_restore(vm_offset_t s, unsigned slot, uint32_t value)
++{
++	gpu_wr(s, 0xc00 + 4 * slot, value);
++	if (gpu_rd(s, 0xc00 + 4 * slot) != value &&
++	    !(gpu_rd(s, 0x800 + 4 * slot) & (1u << 31)) && (value & (3u << 16)) == (2u << 16)) {
++		gpu_wr(s, 0xc00 + 4 * slot, (value & ~(3u << 16)) | (1u << 16));
++	}
++	return gpu_rd(s, 0xc00 + 4 * slot) == value;
++}
++
++static bool
+ gpu_context_test(vm_offset_t s, vm_offset_t m, const ArmSmmu4KConfig *config,
+     const ArmSmmu4KResult *built)
+ {
+ 	/* No global reset/bypass. The held CM3 and collapsed GX provide quiescence. */
+ 	if (gpu_rd(m, 0x14000) != 1 || gpu_rd(s, 0x20) != 0x4c017e06 ||
+ 	    gpu_rd(s, 0x24) != 0x20000005 || gpu_rd(s, 0x28) != 0x5555 ||
+-	    (gpu_rd(s, 0) & 0x40fu) != 0x406 || gpu_rd(s, 0x48) || gpu_rd(s, 0xc058)) {
++	    (gpu_rd(s, 0) & 0x40fu) != 0x406 || gpu_rd(s, 0x48) || (gpu_rd(s, 0xc058) & 0xc00001feu)) {
+ 		printf("RAPHAEL GPU: context batch refused: reset/IDs/global/fault state\n"); return true;
+ 	}
+ 	for (unsigned i = 0; i < 6; ++i) {
+@@ -252,7 +279,14 @@
+ 	printf("RAPHAEL GPU: context batch begin; CB4 ASID5 SID4/5 mask400, CM3 held reset\n");
+ 	int checkpoint = 0;
+ 	(void)tsleep(&checkpoint, PZERO, "gmuctxlog", 3 * hz);
+-	for (unsigned i = 0; i < 2; ++i) { gpu_wr(s, 0xc00 + 4 * i, 2u << 16); }
++	bool faulted = true;
++	for (unsigned i = 0; i < 2; ++i) { faulted &= gpu_stream_fault(s, i); }
++	if (!faulted) {
++		bool restored = true;
++		for (unsigned i = 0; i < 2; ++i) { restored &= gpu_stream_restore(s, i, s2cr[i]); }
++		printf("RAPHAEL GPU: context refused: no verified FAULT encoding; invalid slots restored=%u\n", restored);
++		return true;
++	}
+ 	gpu_wr(s, 0xc000, 0);
+ 	gpu_context_write(s, &image);
+ 	gpu_wr(s, 0xc004, 0x303); /* Live DT qcom,actlr for GMU SIDs. */
+@@ -274,16 +308,20 @@
+ 		routed &= gpu_rd(s, 0x800 + 4 * i) == 0x84000004u + i;
+ 		if (routed) { gpu_wr(s, 0xc00 + 4 * i, 4); routed &= gpu_rd(s, 0xc00 + 4 * i) == 4; }
+ 	}
+-	routed &= !gpu_rd(s, 0xc058) && !gpu_rd(s, 0x48);
++	for (unsigned i = 0; i < 2; ++i) {
++		printf("RAPHAEL GPU: route%u SMR=%#x S2CR=%#x original=%#x/%#x\n",
++		    i, gpu_rd(s, 0x800 + 4 * i), gpu_rd(s, 0xc00 + 4 * i), smr[i], s2cr[i]);
++	}
++	/* FSR.FORMAT[10:9] describes the context format, not a fault. */
++	routed &= !(gpu_rd(s, 0xc058) & 0xc00001feu) && !gpu_rd(s, 0x48);
+ 	printf("RAPHAEL GPU: context programmed=%u routed=%u SCTLR=%#x TCR=%#x TTBR=%#llx FSR=%#x GFSR=%#x\n",
+ 	    programmed, routed, gpu_rd(s, 0xc000), gpu_rd(s, 0xc030), (unsigned long long)gpu_rd64(s, 0xc020), gpu_rd(s, 0xc058), gpu_rd(s, 0x48));
+-	/* Quarantine before invalidating slots, then disable and drain before recycling tables. */
++	/* Masters remain stopped: unmatch first so a failed quirk probe cannot publish bypass. */
+ 	bool detached = true;
+ 	for (unsigned i = 0; i < 2; ++i) {
+-		gpu_wr(s, 0xc00 + 4 * i, 2u << 16);
+-		detached &= gpu_rd(s, 0xc00 + 4 * i) == (2u << 16);
+ 		gpu_wr(s, 0x800 + 4 * i, 0);
+-		detached &= gpu_rd(s, 0x800 + 4 * i) == 0;
++		bool unmatched = gpu_rd(s, 0x800 + 4 * i) == 0;
++		detached &= unmatched && gpu_stream_fault(s, i);
+ 	}
+ 	gpu_wr(s, 0xc000, 0);
+ 	bool drained = gpu_rd(s, 0xc000) == 0 && gpu_context_sync(s);
+@@ -292,7 +330,7 @@
+ 		return false;
+ 	}
+ 	gpu_context_write(s, &old); gpu_wr(s, 0xc004, actlr); gpu_wr(s, 0xc000, old.sctlr);
+-	for (unsigned i = 0; i < 2; ++i) { gpu_wr(s, 0xc00 + 4 * i, s2cr[i]); gpu_wr(s, 0x800 + 4 * i, smr[i]); }
++	for (unsigned i = 0; i < 2; ++i) { (void)gpu_stream_restore(s, i, s2cr[i]); gpu_wr(s, 0x800 + 4 * i, smr[i]); }
+ 	gpu_context_read(s, &readback);
+ 	bool restored = !memcmp(&old, &readback, sizeof(old)) && gpu_rd(s, 0xc004) == actlr;
+ 	for (unsigned i = 0; i < 2; ++i) {

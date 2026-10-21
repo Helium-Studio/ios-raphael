@@ -56,6 +56,7 @@ static unsigned firmware_bytes, firmware_present, firmware_cleaned, smmu_writes,
 static uintptr_t allocation;
 static size_t allocation_bytes;
 static int context_bad_readback, context_bad_route, context_drain_fail, context_detach_fail, fw_tcm_fail;
+static int fault_quirk, fault_unsupported, bypass_writes, route_publishes, unmatch_fail;
 static kern_return_t kmem_alloc_contig(int map,uintptr_t *v,size_t n,uintptr_t mask,ppnum_t max,ppnum_t pmask,int flags,int tag) {
     assert(map==kernel_map && (n==sizeof(arena) || n==sizeof(fw_arena)) && mask==PAGE_MASK && max==(((1ull<<40)-1)>>PAGE_SHIFT) && !pmask && flags==(KMA_DATA|KMA_ZERO) && tag==VM_KERN_MEMORY_IOKIT && !allocated);
     if(alloc_fail)return 5;
@@ -110,9 +111,16 @@ static void model_write(uintptr_t bank,unsigned off,uint32_t value) {
         assert(gmu[0x16000/4]==1 && !(cc[0x100c/4]&(1u<<31)));
         if(off==0xc618) {assert(value==0);++tlbi_commands;return;}
         if(off==0xc7f0) {assert(value==0xffffffffu);return;}
+        if(unmatch_fail && off==0x800 && value==0 && (smmu[off/4]&(1u<<31)))return;
         if(context_bad_readback && off==0xc030 && value!=0) value^=1;
         if(context_bad_route && off==0x800 && value==0x84000004u) value^=1;
-        if(context_detach_fail && off==0xc00 && value==(2u<<16) && smmu[off/4]==4)return;
+        if(off==0xc00 || off==0xc04) {
+            unsigned type=(value>>16)&3;
+            if(context_detach_fail && off==0xc00 && (type==1 || type==2) && smmu[off/4]==4)return;
+            if(type==2 && (fault_quirk || fault_unsupported))return;
+            if(type==1) {assert(!(smmu[(off-0x400)/4]&(1u<<31)));++bypass_writes;if(fault_quirk)value=(value&~(3u<<16))|(2u<<16);}
+        }
+        if((off==0x800 || off==0x804) && (value&(1u<<31))) {assert(((smmu[(off+0x400)/4]>>16)&3)==2);++route_publishes;}
         smmu[off/4]=value;++smmu_writes;return;
     }
     if(bank==(uintptr_t)gmu+0x2000) {
@@ -223,6 +231,7 @@ static void reset_fw(void) {
     smmu[0]=0x250406;smmu[0x20/4]=0x4c017e06;smmu[0x24/4]=0x20000005;smmu[0x28/4]=0x5555;smmu[0x800/4]=0;
     firmware_cleaned=smmu_writes=tlbi_commands=0;
     context_bad_readback=context_bad_route=context_drain_fail=context_detach_fail=fw_tcm_fail=0;
+    fault_quirk=fault_unsupported=bypass_writes=route_publishes=unmatch_fail=0;
     memcpy(saved_smmu,smmu,sizeof(smmu));
 }
 int main(int argc,char **argv) {
@@ -325,6 +334,21 @@ int main(int argc,char **argv) {
         reset_fw();gpu_firmware_test((uintptr_t)smmu,(uintptr_t)gmu+0x2000);
         assert(firmware_cleaned==1 && !allocated && freed==1 && smmu_writes>0 && tlbi_commands==2 && !memcmp(saved_smmu,smmu,sizeof(smmu)));
         for(unsigned i=0;i<sizeof(gmu)/4;i++)assert(gmu[i]==(i==0x16000/4 ? 1u : 0u));
+        assert(!bypass_writes && route_publishes==2);
+        reset_fw();fault_quirk=1;smmu[0xc058/4]=0x400;memcpy(saved_smmu,smmu,sizeof(smmu));
+        gpu_firmware_test((uintptr_t)smmu,(uintptr_t)gmu+0x2000);
+        assert(freed==1 && !allocated && tlbi_commands==2 && bypass_writes==4 && route_publishes==2 && !memcmp(saved_smmu,smmu,sizeof(smmu)));
+        reset_fw();fault_quirk=1;smmu[0xc00/4]=0x20007;smmu[0xc04/4]=0x20008;memcpy(saved_smmu,smmu,sizeof(smmu));
+        gpu_firmware_test((uintptr_t)smmu,(uintptr_t)gmu+0x2000);
+        assert(freed==1 && !allocated && tlbi_commands==2 && bypass_writes==4 && route_publishes==2 && !memcmp(saved_smmu,smmu,sizeof(smmu)));
+        reset_fw();fault_unsupported=1;gpu_firmware_test((uintptr_t)smmu,(uintptr_t)gmu+0x2000);
+        assert(freed==1 && !allocated && !tlbi_commands && bypass_writes==2 && !route_publishes && !memcmp(saved_smmu,smmu,sizeof(smmu)));
+        reset_fw();smmu[0x800/4]=1u<<31;assert(!gpu_stream_fault((uintptr_t)smmu,0) && !smmu_writes);
+        unsigned faults[]={2,4,8,16,32,64,128,256,1u<<30,1u<<31};
+        for(unsigned i=0;i<sizeof(faults)/sizeof(faults[0]);i++) {
+            reset_fw();smmu[0xc058/4]=0x400|faults[i];gpu_firmware_test((uintptr_t)smmu,(uintptr_t)gmu+0x2000);
+            assert(freed==1 && !smmu_writes && !tlbi_commands && !route_publishes);
+        }
         reset_fw();firmware[0]^=1;gpu_firmware_test((uintptr_t)smmu,(uintptr_t)gmu+0x2000);firmware[0]^=1;
         assert(!allocated && !freed && !smmu_writes && !tcm_writes);
         reset_fw();--firmware_bytes;gpu_firmware_test((uintptr_t)smmu,(uintptr_t)gmu+0x2000);++firmware_bytes;
@@ -340,6 +364,7 @@ int main(int argc,char **argv) {
         memcpy(saved_smmu,smmu,sizeof(smmu));sweet_gpu_probe();
         assert(firmware_cleaned && freed==2 && !allocated && !memcmp(saved_smmu,smmu,sizeof(smmu)) && !memcmp(saved,cc,sizeof(cc)));
         reset_fw();context_detach_fail=1;gpu_firmware_test((uintptr_t)smmu,(uintptr_t)gmu+0x2000);assert(allocated && !freed);allocated=0;++retained;
+        reset_fw();unmatch_fail=1;gpu_firmware_test((uintptr_t)smmu,(uintptr_t)gmu+0x2000);assert(allocated && !freed && !bypass_writes);allocated=0;++retained;
         reset_fw();context_drain_fail=1;gpu_firmware_test((uintptr_t)smmu,(uintptr_t)gmu+0x2000);assert(allocated && !freed && tlbi_commands==2);++retained;
         /* Model teardown only: production keeps this allocation until reboot. */
         allocated=0;free(firmware);
@@ -354,5 +379,7 @@ with tempfile.TemporaryDirectory(prefix='raphael-gpu-') as tmp:
                     '-fsanitize=address,undefined', '-Wno-deprecated-declarations', '-g', '-I', str(dev), str(c),
                     str(dev / 'ArmSmmu4K.c'), str(dev / 'ArmSmmu4KContext.c'), str(dev / 'AdrenoFirmware.c'),
                     '-lcrypto', '-o', str(exe)], check=True)
-    subprocess.run([str(exe), *sys.argv[2:]], check=True, stdout=subprocess.DEVNULL)
+    result = subprocess.run([str(exe), *sys.argv[2:]], check=True, capture_output=True, text=True)
+    if len(sys.argv) > 2:
+        assert any("programmed=1 routed=1" in line and "FSR=0x400 GFSR=0" in line for line in result.stdout.splitlines())
 print('PASS: A640 gates/rollback and owned tables; optional firmware fixture exercises load/CB4/routes/drain/retention (ASan/UBSan)')
