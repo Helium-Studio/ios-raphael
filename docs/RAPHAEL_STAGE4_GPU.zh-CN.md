@@ -216,6 +216,15 @@ TLB排空/路由撤除失败时保留内存，以及整个时钟→装载→上�
 真机测试待完成。GMU全程保持复位，本轮仍不能证明硬件页表遍历、固件执行或GPU渲染。
 正式释放复位前还需完成RPMh ARC/BCM、RSC/PDC、DMA缓存属性和fault中断处理。
 
+后续执行参数已核对到本机固件：DTCM `0x43fe0` 的版本字为 `0x20000105`，
+按本地Linux `a6xx_gmu_start()` 应等待完整 `0xbabeface`，不能沿用新版固件的
+`(result & 0x1ff)==0x100`。本机chip ID转换后的HFI_SFR值为 `0x06040100`。
+A640 PDC第三个资源地址 `0x30090` 在实际command-db中是 `xo.lvl`；
+同表的cx/mx/gfx分别为 `0x30000/0x30010/0x30050`。ARC命令数据是该资源
+corner表的索引，须逐项匹配电压等级；现有L11C的VRM毫伏/模式/enable三命令不可复用为ARC投票。
+实际apps-RSC的地址、DRV2及ACTIVE2/SLEEP3/WAKE3布局与现有传输层一致，
+可复用其空闲TCS检查、锁、完成确认和超时隔离；须扩展资源解析及命令格式。
+
 ## 接下来的通过条件
 
 按实际探测结果完成 A640 CX 电源、200MHz GMU 时钟、RPMh ARC/BCM 投票和 RSC/PDC；
