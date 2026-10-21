@@ -216,7 +216,11 @@ TLB排空/路由撤除失败时保留内存，以及整个时钟→装载→上�
 CI [39620456482](https://github.com/HeliumStudio-Dev/ios-raphael/actions/runs/39620456482)
 已通过，源码 `fc4b2e2`。2026-10-21 23:01临时启动成功；
 镜像SHA256为 `23d906fb43421171a14b5e881024ed206f33dfbcba34ca9a1db946261f5d3994`。
-锁屏/输入与持久测试日志待确认；不能从fastboot成功推断装载或上下文测试通过。
+用户确认锁屏/输入正常。持久日志208018字节、flush71，八核检查通过，未记录panic。
+固件完整装载读回成功，context programmed=1，但routed=0；撤除detached=0、TLB drained=1。
+代码保留分配，TCM及外层电源/时钟恢复成功。SCTLR=0x67、TCR=0x80802020、FSR=0x400。
+本地Linux定义FSR[10:9]为FORMAT，0x400不含fault位；0090用原始FSR非零判断失败有误。
+撤除失败还与Qualcomm固件的FAULT写入过滤特性一致，需0091记录S2CR读回后验证，不能宣称路由已通过。
 GMU全程保持复位，本轮仍不能证明硬件页表遍历、固件执行或GPU渲染。
 正式释放复位前还需完成RPMh ARC/BCM、RSC/PDC、DMA缓存属性和fault中断处理。
 
