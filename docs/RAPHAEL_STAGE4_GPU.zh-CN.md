@@ -180,20 +180,23 @@ IDR1=`0x20000005`、IDR2=`0x5555`、sCR0=`0x240406`、GFSR=0。
 
 主机测试直接运行实际C代码和导入的建表核心，覆盖分配/物理连续性失败、
 输出位宽不足、200MHz/XO更新超时、TCM写入失败、原有父时钟投票保留及CX失败回退。
-三个翻译单元本地arm64交叉编译通过。真机结果待验证；200MHz由寄存器配置推算，未做频率测量。
+三个翻译单元本地arm64交叉编译通过。200MHz由寄存器配置推算，未做频率测量。
 本轮不写SMMU上下文/路由，不释放GMU复位，不装入固件、不启动DMA或发布accelerator。
 
 CI [39615436048](https://github.com/HeliumStudio-Dev/ios-raphael/actions/runs/39615436048)
 已通过，源码 `0448a42`。0089于2026-10-21 22:31临时启动，发送/启动均成功；
 镜像SHA256为 `1c4e6b840f7e3d3027c8b8d436361ed56bd6cbe5f9b44a7e1ed7a201a249c831`。
-锁屏与合并测试持久日志待确认；不能据此宣称200MHz、TCM或GPU渲染已通过真机验证。
+用户确认锁屏、触控与按键正常。持久日志207195字节、flush69，八核检查通过，未记录panic。
+内存owned=1/build=0/walked=1，3个表页及4个叶子；200MHz配置成功，ITCM/DTCM
+均write=1/restored=1且reset=1。XO、CX和父时钟投票全部恢复。
+这些验证了实际分配、软件页表遍历与时钟/TCM访问；尚未验证硬件翻译、DMA或GPU渲染。
 
 ## 接下来的通过条件
 
 按实际探测结果完成 A640 CX 电源、200MHz GMU 时钟、RPMh ARC/BCM 投票和 RSC/PDC；
 建立独立的4KiB GMU/GPU SMMU映射，处理16KiB CPU分配与缓存同步，不能使用 DMA bypass。
 主机上用上游 ArmSmmu4K 实际代码已将模拟16KiB分配映射成四个4KiB叶子，使用3个表页；
-这只证明软件布局可行，未证明真机分配/缓存/DMA正确。NativeAdreno中的CPU页号移位、
+0089已验证真机分配与缓存清理调用；仍未证明硬件页表遍历、DMA或缓存一致性正确。NativeAdreno中的CPU页号移位、
 BO分配取整、导入页所有权和页属性恢复仍需适配；不能只删除4KiB检查。
 A640 DT 没有 sheng 的 dma-coherent 声明，页表遍历一致性也必须单独验证。
 正确装入 A640 固件并取得真实 FW/HFI ACK 后，再做 SQE、ring、scratch write 与 fence。
