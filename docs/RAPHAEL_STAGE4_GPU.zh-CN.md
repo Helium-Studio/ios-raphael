@@ -30,6 +30,12 @@ Metal 插件、metal2vulkan/AIR 编译、Turnip 和显示交接；当前 iOS 根
 默认只运行异步测试并返回nil，旁置 `.publish` 文件才发布真实设备。
 只有GPU测试、Turnip设备创建与iOS16 ABI验证通过后，才应安装和开启发布模式。
 
+显示交接也有接口差异：上游 `GpuScanoutClient.h` 通过accelerator的 `0x7000..0x7003`
+方法及 `0x5343` 内存类型接入NativeMobileDisplay的NGP协议；当前 `SweetFramebuffer.cpp`
+使用IOMobileFramebuffer SwapEnd记录IOSurface，再由vsync定时器用CPU复制到面板。
+移植时要保留实际surface的内存所有权和映射生命周期，增加经过验证的GPU提交/完成交接，
+并在GPU失败时维持现有显示路径；安装Metal插件本身不会替换这段CPU复制。
+
 | 项目 | NativeAdreno / sheng | raphael 实测与本地 Linux 参考 |
 | --- | --- | --- |
 | GPU | Adreno 740 / SM8550 | Adreno640v2，live DT chip ID `0x06040001` |
