@@ -111,7 +111,7 @@ CX_HW=`0x5ff4`、GX_CFG=`0x88400`、clamp=`0x3c0001`；两域均未上电。
 GMU分支为 `0x80004220`，RCG为 `0x80000000/0`，尚未启用。
 配置AHB可读，但GMU/GX/SMMU均按门控跳过；这不是已启动GPU。
 
-## 0087：CX 上电与回退测试（待真机验证）
+## 0087：CX 上电与回退测试已通过
 
 `--gpu-cx-test` 使用 `raphaelgpu=2 ufslogsecs=1`，保留输入/八核配置。
 只接受未上电、软件控制的CX和GMU源仍为XO的状态；先等待3秒让日志保存检查点。
@@ -130,7 +130,22 @@ bash tools/build-raphael-stage2.sh KERNEL RAPHAEL_DTB --touch --keys --cpus 8 --
 CI [39607750670](https://github.com/HeliumStudio-Dev/ios-raphael/actions/runs/39607750670)
 已通过（源码 `4360fb9`，7分10秒）。0087镜像于2026-10-21 21:34临时启动成功，
 SHA256为 `0b460ae3dac13c0dbafc1f1a2036a392667ab56fdd3ce3b55c7202cafc5ac3e7`。
-锁屏和CX测试日志尚待确认。
+用户确认锁屏、触控和按键正常。README持久日志217718字节、flush123；八核SGI通过，
+没有记录到panic。CX成功上电，GDSCR=`0xf8282000`、HW=`0x80001fe0`；
+AHB/CXO=`1`、GMU=`0x4221`、RCG=`0/0`，GMU复位位仍为1。
+测试后 `restored=1 off=1`，CX回到 `0x222001/0x5ff4`。
+这证明本地CX和XO分支可启用、访问、恢复，尚未运行GMU固件。
+
+## 0088：在同一上电窗口读取 SMMU
+
+继续使用 `--gpu-cx-test`，不增加启动选项。只有GMU仍保持复位、
+GCC memnoc/dvm及GPUCC AHB时钟均启用时才访问SMMU；不尝试开启共享总线分支。
+读取ID、故障状态及受几何检查约束的有效SMR/S2CR、上下文寄存器和TTBR，
+用于区分固件保留路由与未启用的上下文。寄存器页尺寸由IDR1推导，
+要求完整区域恰好落在设备树的64KiB窗口内；未知/全1/越界几何或扩展SID模式会停止深入读取。
+访问前额外等待3秒保存日志检查点，结束后仍走0087的控制位恢复流程。
+不清故障、不写路由/上下文、不复位SMMU、不使用DMA bypass。
+主机ASan/UBSan覆盖有效及畸形几何、时钟/复位门控、映射失败与恢复；真机结果待验证。
 
 ## 接下来的通过条件
 

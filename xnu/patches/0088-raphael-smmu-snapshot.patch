@@ -1,0 +1,78 @@
+--- a/bsd/dev/sweet_gpu.c
++++ b/bsd/dev/sweet_gpu.c
+@@ -67,7 +67,56 @@
+ }
+ 
+ static void
+-gpu_cx_test(vm_offset_t cc)
++gpu_smmu_snapshot(vm_offset_t gcc, vm_offset_t cc)
++{
++	uint32_t mem = gpu_rd(gcc, 0x7100c), dvm = gpu_rd(gcc, 0x71018);
++	printf("RAPHAEL GPU: SMMU clocks memnoc=%#x dvm=%#x cx_dvm=%#x\n",
++	    mem, dvm, gpu_rd(cc, 0x108c));
++	if (!gpu_clock_live(mem) || !gpu_clock_live(dvm) ||
++	    !gpu_clock_live(gpu_rd(cc, 0x1078))) {
++		printf("RAPHAEL GPU: SMMU snapshot skipped: bus clocks off\n");
++		return;
++	}
++	printf("RAPHAEL GPU: SMMU snapshot begin; GMU held reset, no SMMU writes\n");
++	int checkpoint = 0;
++	(void)tsleep(&checkpoint, PZERO, "gpusmmulog", 3 * hz);
++	vm_offset_t s = ml_io_map(0x02ca0000, 0x10000);
++	if (!s) { printf("RAPHAEL GPU: SMMU map failed\n"); return; }
++	uint32_t cr0 = gpu_rd(s, 0), id0 = gpu_rd(s, 0x20), id1 = gpu_rd(s, 0x24), id2 = gpu_rd(s, 0x28);
++	printf("RAPHAEL GPU: SMMU sCR0=%#x IDR0=%#x IDR1=%#x IDR2=%#x IDR7=%#x GFSR=%#x\n",
++	    cr0, id0, id1, id2, gpu_rd(s, 0x3c), gpu_rd(s, 0x48));
++	/* Register page size is independent of both CPU and translation granules. */
++	unsigned page = (id1 & (1u << 31)) ? 0x10000 : 0x1000;
++	unsigned half = page << (((id1 >> 28) & 7u) + 1);
++	unsigned banks = id1 & 0xffu, s2 = (id1 >> 16) & 0xffu, groups = id0 & 0xffu;
++	if (!id0 || id0 == 0xffffffffu || id1 == 0xffffffffu || id2 == 0xffffffffu ||
++	    2 * half != 0x10000 || !banks || banks > half / page || s2 > banks ||
++	    !(id0 & (1u << 27)) || !groups || groups > 128 || cr0 == 0xffffffffu || (cr0 & 8u)) {
++		printf("RAPHAEL GPU: SMMU unsupported IDs/geometry; context reads skipped\n");
++		return;
++	}
++	printf("RAPHAEL GPU: SMMU geometry page=%#x half=%#x banks=%u s2=%u groups=%u\n",
++	    page, half, banks, s2, groups);
++	for (unsigned i = 0; i < groups; ++i) {
++		uint32_t smr = gpu_rd(s, 0x800 + 4 * i);
++		if (smr & (1u << 31)) {
++			printf("RAPHAEL GPU: SMMU route%u SMR=%#x S2CR=%#x\n",
++			    i, smr, gpu_rd(s, 0xc00 + 4 * i));
++		}
++	}
++	for (unsigned i = 0; i < banks; ++i) {
++		vm_offset_t cb = s + half + i * page;
++		printf("RAPHAEL GPU: SMMU CB%u CBAR=%#x CBA2R=%#x SCTLR=%#x ACTLR=%#x TCR=%#x FSR=%#x\n",
++		    i, gpu_rd(s, page + 4 * i), gpu_rd(s, page + 0x800 + 4 * i),
++		    gpu_rd(cb, 0), gpu_rd(cb, 4), gpu_rd(cb, 0x30), gpu_rd(cb, 0x58));
++		printf("RAPHAEL GPU: SMMU CB%u TTBR0=%#x:%08x TTBR1=%#x:%08x\n", i,
++		    gpu_rd(cb, 0x24), gpu_rd(cb, 0x20), gpu_rd(cb, 0x2c), gpu_rd(cb, 0x28));
++	}
++	printf("RAPHAEL GPU: SMMU snapshot done; no route/context changes\n");
++}
++
++static void
++gpu_cx_test(vm_offset_t cc, vm_offset_t gcc)
+ {
+ 	int log_secs = 0;
+ 	(void)PE_parse_boot_argn("ufslogsecs", &log_secs, sizeof(log_secs));
+@@ -110,6 +159,8 @@
+ 				printf("RAPHAEL GPU: CX test GMU reset=%#x init=%#x busy=%#x power=%#x retention=%#x\n",
+ 				    gpu_rd(m, 0x14000), gpu_rd(m, 0x14070), gpu_rd(m, 0x14068),
+ 				    gpu_rd(m, 0x14340), gpu_rd(m, 0x14730));
++				if (gpu_rd(m, 0x14000) == 1u) { gpu_smmu_snapshot(gcc, cc); }
++				else { printf("RAPHAEL GPU: SMMU snapshot skipped: GMU not held reset\n"); }
+ 			} else { printf("RAPHAEL GPU: CX test GMU map failed\n"); }
+ 		}
+ 	}
+@@ -155,7 +206,7 @@
+ 	printf("RAPHAEL GPU: GPUCC cx=%#x gx=%#x ahb=%#x gmu=%#x cxo=%#x\n", cx, gx, ahb, gmu, cxo);
+ 	printf("RAPHAEL GPU: GMU RCG=%#x/%#x CX_HW=%#x GX_CFG=%#x GX_CLAMP=%#x\n",
+ 	    gpu_rd(cc, 0x1120), gpu_rd(cc, 0x1124), cx_hw, gx_cfg, clamp);
+-	if (enabled == 2) { gpu_cx_test(cc); return; }
++	if (enabled == 2) { gpu_cx_test(cc, gcc); return; }
+ 	/* Linux polls CX HW_CTRL bit31 and GX CFG_GDSCR bit16, not requests. */
+ 	if (cx_on && gpu_clock_live(ahb) && gpu_clock_live(gmu) && gpu_clock_live(cxo)) {
+ 		vm_offset_t m = ml_io_map(0x02c68000, 0x34000);

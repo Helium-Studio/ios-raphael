@@ -11,6 +11,7 @@ source = source[source.index('static bool\ngpu_is_raphael'):source.rindex('#endi
 for barrier in ('dmb oshst', 'dsb osh'):
     source = source.replace(f'__asm__ volatile("{barrier}" ::: "memory");', '')
 source = source.replace('*(volatile uint32_t *)(bank + off) = next;', 'model_write(bank, off, next);')
+source = source.replace('return *(const volatile uint32_t *)(bank + off);', 'return model_read(bank + off);')
 code = r'''
 #include <assert.h>
 #include <stdbool.h>
@@ -27,6 +28,7 @@ typedef int DTEntry;
 static uint32_t gcc[0x100000/4], cc[0xc000/4], gmu[0x34000/4], gpu[0x40000/4], smmu[0x10000/4];
 static int enabled, maps, missing, failmap;
 static int model, power_fail, clock_fail, off_fail, gmu_failmap, log_secs=1, writes, sleeps, delays;
+static int bus_fail, smmu_failmap, smmu_reads, context_reads;
 static const char *compatible;
 static unsigned length;
 static int PE_parse_boot_argn(const char *k, void *v, int n) {
@@ -41,8 +43,21 @@ static void model_write(uintptr_t bank,unsigned off,uint32_t value) {
     assert(mask && !((cc[off/4]^value)&~mask));
     cc[off/4]=value; ++writes;
 }
+static uint32_t model_read(uintptr_t address) {
+    uint32_t *banks[]={gcc,cc,gmu,gpu,smmu};
+    size_t sizes[]={sizeof(gcc),sizeof(cc),sizeof(gmu),sizeof(gpu),sizeof(smmu)};
+    assert(!(address&3));
+    for(unsigned i=0;i<5;i++) {
+        uintptr_t base=(uintptr_t)banks[i];
+        if(address>=base && address-base<sizes[i]) {
+            if(i==4) {++smmu_reads; if(address-base>=0x800)++context_reads;}
+            return *(uint32_t *)address;
+        }
+    }
+    assert(0); return 0;
+}
 static int tsleep(void *channel,int priority,const char *name,int ticks) {
-    (void)channel; assert(priority==PZERO && !strcmp(name,"gpucxlog") && ticks==3*hz); ++sleeps; return 0;
+    (void)channel; assert(priority==PZERO && (!strcmp(name,"gpucxlog") || !strcmp(name,"gpusmmulog")) && ticks==3*hz); ++sleeps; return 0;
 }
 static void delay(unsigned n) {
     (void)n; assert(++delays<10000);
@@ -53,6 +68,12 @@ static void delay(unsigned n) {
     for(unsigned i=0;i<3;i++) {
         uint32_t *v=&cc[offsets[i]/4];
         if((cc[0x1540/4]&(1u<<31)) && (*v&1) && !clock_fail)*v&=~(1u<<31);
+        else *v|=1u<<31;
+    }
+    unsigned buses[]={0x7100c,0x71018};
+    for(unsigned i=0;i<2;i++) {
+        uint32_t *v=&gcc[buses[i]/4];
+        if((cc[0x1540/4]&(1u<<31)) && (*v&1) && !bus_fail)*v&=~(1u<<31);
         else *v|=1u<<31;
     }
 }
@@ -69,15 +90,27 @@ static uintptr_t ml_io_map(uintptr_t address,uintptr_t bytes) {
         if(model)assert(cc[0x1540/4]&(1u<<31));
         return gmu_failmap ? 0 : (uintptr_t)gmu;
     case 0x2c00000: assert(bytes==sizeof(gpu)); return (uintptr_t)gpu;
-    case 0x2ca0000: assert(bytes==sizeof(smmu)); return (uintptr_t)smmu;
+    case 0x2ca0000:
+        assert(bytes==sizeof(smmu));
+        if(model)assert((cc[0x1540/4]&(1u<<31)) && !(gcc[0x7100c/4]&(1u<<31)) && !(gcc[0x71018/4]&(1u<<31)));
+        return smmu_failmap ? 0 : (uintptr_t)smmu;
     default: assert(0); return 0;
     }
 }
 ''' + source + r'''
 static uint32_t saved[sizeof(cc)/4];
+static uint32_t saved_smmu[sizeof(smmu)/4];
 static void reset_cx(void) {
     enabled=2; model=1; maps=writes=sleeps=delays=0;
     power_fail=clock_fail=off_fail=gmu_failmap=0; log_secs=1;
+    bus_fail=smmu_failmap=smmu_reads=context_reads=0;
+    gcc[0x7100c/4]=0x80000221; gcc[0x71018/4]=0x80000001;
+    gmu[0x16000/4]=1; /* GMU remains held in reset throughout. */
+    memset(smmu,0,sizeof(smmu));
+    smmu[0x20/4]=(1u<<30)|(1u<<27)|128u;
+    smmu[0x24/4]=(2u<<28)|8u; smmu[0x28/4]=1u<<12;
+    smmu[0x800/4]=0x84000005; smmu[0xc00/4]=1;
+    memcpy(saved_smmu,smmu,sizeof(smmu));
     memset(cc,0,sizeof(cc));
     cc[0x106c/4]=cc[0x100c/4]=0x222001;
     cc[0x1540/4]=0x5ff4; cc[0x1010/4]=0x88400; cc[0x1508/4]=0x3c0001;
@@ -118,7 +151,29 @@ int main(void) {
     for(unsigned i=0;i<sizeof(gpu)/4;i++)assert(!gpu[i]);
     for(unsigned i=0;i<sizeof(smmu)/4;i++)assert(!smmu[i]);
     reset_cx(); sweet_gpu_probe();
-    assert(maps==3 && writes>0 && sleeps==1 && !memcmp(saved,cc,sizeof(cc)));
+    assert(maps==4 && writes>0 && sleeps==2 && context_reads>0 && !memcmp(saved,cc,sizeof(cc)));
+    assert(!memcmp(saved_smmu,smmu,sizeof(smmu)));
+    assert(gcc[0x7100c/4]==0x80000221 && gcc[0x71018/4]==0x80000001);
+    reset_cx(); bus_fail=1; sweet_gpu_probe();
+    assert(maps==3 && sleeps==1 && smmu_reads==0 && !memcmp(saved,cc,sizeof(cc)));
+    reset_cx(); smmu_failmap=1; sweet_gpu_probe();
+    assert(maps==4 && sleeps==2 && smmu_reads==0 && !memcmp(saved,cc,sizeof(cc)));
+    reset_cx(); gmu[0x16000/4]=0; sweet_gpu_probe();
+    assert(maps==3 && sleeps==1 && smmu_reads==0 && !memcmp(saved,cc,sizeof(cc)));
+    unsigned bad_id1[]={0xffffffffu,0x80000008,0x30000008,0x20000000,0x20000009,0x20090008};
+    for(unsigned i=0;i<sizeof(bad_id1)/sizeof(bad_id1[0]);i++) {
+        reset_cx(); smmu[0x24/4]=bad_id1[i]; sweet_gpu_probe();
+        assert(maps==4 && smmu_reads>0 && context_reads==0 && !memcmp(saved,cc,sizeof(cc)));
+    }
+    unsigned bad_id0[]={0,0xffffffffu,1u<<30,(1u<<27)|129u};
+    for(unsigned i=0;i<sizeof(bad_id0)/sizeof(bad_id0[0]);i++) {
+        reset_cx(); smmu[0x20/4]=bad_id0[i]; sweet_gpu_probe();
+        assert(smmu_reads>0 && context_reads==0 && !memcmp(saved,cc,sizeof(cc)));
+    }
+    reset_cx(); smmu[0x28/4]=0xffffffffu; sweet_gpu_probe();
+    assert(smmu_reads>0 && context_reads==0 && !memcmp(saved,cc,sizeof(cc)));
+    reset_cx(); smmu[0]=8; sweet_gpu_probe(); /* Extended stream IDs use different valid bits. */
+    assert(smmu_reads>0 && context_reads==0 && !memcmp(saved,cc,sizeof(cc)));
     reset_cx(); power_fail=1; sweet_gpu_probe();
     assert(maps==2 && sleeps==1 && !memcmp(saved,cc,sizeof(cc)));
     reset_cx(); clock_fail=1; sweet_gpu_probe();
@@ -126,7 +181,7 @@ int main(void) {
     reset_cx(); gmu_failmap=1; sweet_gpu_probe();
     assert(maps==3 && !memcmp(saved,cc,sizeof(cc)));
     reset_cx(); off_fail=1; sweet_gpu_probe();
-    assert(maps==3 && delays>2000 && (cc[0x106c/4]&0xfff007u)==(saved[0x106c/4]&0xfff007u));
+    assert(maps==4 && delays>2000 && (cc[0x106c/4]&0xfff007u)==(saved[0x106c/4]&0xfff007u));
     reset_cx(); log_secs=10; sweet_gpu_probe(); assert(writes==0 && sleeps==0);
     reset_cx(); cc[0x106c/4]|=2; sweet_gpu_probe(); assert(writes==0 && sleeps==0);
     reset_cx(); cc[0x1540/4]|=1u<<31; sweet_gpu_probe(); assert(writes==0 && sleeps==0);
@@ -134,9 +189,9 @@ int main(void) {
     reset_cx(); cc[0x1540/4]=0xffffffffu; sweet_gpu_probe(); assert(writes==0 && sleeps==0);
     reset_cx(); cc[0x1098/4]=0xffffffffu; sweet_gpu_probe(); assert(writes==0 && sleeps==0);
     reset_cx(); enabled=3; sweet_gpu_probe(); assert(maps==0 && writes==0);
-    for(unsigned i=0;i<sizeof(gmu)/4;i++)assert(!gmu[i]);
+    for(unsigned i=0;i<sizeof(gmu)/4;i++)assert(gmu[i]==(i==0x16000/4 ? 1u : 0u));
     for(unsigned i=0;i<sizeof(gpu)/4;i++)assert(!gpu[i]);
-    for(unsigned i=0;i<sizeof(smmu)/4;i++)assert(!smmu[i]);
+    assert(!memcmp(saved_smmu,smmu,sizeof(smmu)));
 }
 '''
 with tempfile.TemporaryDirectory(prefix='raphael-gpu-') as tmp:
@@ -145,4 +200,4 @@ with tempfile.TemporaryDirectory(prefix='raphael-gpu-') as tmp:
     subprocess.run([os.environ.get('CC', 'cc'), '-Wall', '-Wextra', '-Werror',
                     '-fsanitize=address,undefined', '-g', str(c), '-o', str(exe)], check=True)
     subprocess.run([str(exe)], check=True, stdout=subprocess.DEVNULL)
-print('PASS: actual A640 probe gates, CX success/timeouts/map failure/rollback, no GX or DMA writes (ASan/UBSan)')
+print('PASS: A640 gates, CX rollback, SMMU geometry/routes/map failure/clock and reset gates; no SMMU/GX/DMA writes (ASan/UBSan)')
