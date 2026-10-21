@@ -93,6 +93,12 @@ fastboot boot shim/out/raphael-stage3.img
 并检查模拟 MMIO 保持原值、全1无效状态被拒绝；本地 GPU/UFS 两个文件交叉编译通过。
 真机启动结果与 CI 信息持续记录在 `NOTES.md`，未获日志前不宣称探测通过。
 
+2026-10-21 21:07 已临时启动首个探测镜像，发送与启动均OKAY，尚待屏幕反馈和持久日志。
+CI [39443279478](https://github.com/HeliumStudio-Dev/ios-raphael/actions/runs/39443279478)
+通过，内核源码为 `3af6f55`；镜像 `shim/out/raphael-0086-gpu-probe.img` 的SHA256为
+`4d83c4ca3d5a15fc7ade5cf4f4018a080e8fca9391f89acd5449ffcbdb02fd92`。
+该镜像保留八核、触控与按键；没有安装Metal插件，也没有刷写分区。
+
 ## 接下来的通过条件
 
 按实际探测结果完成 A640 CX 电源、200MHz GMU 时钟、RPMh ARC/BCM 投票和 RSC/PDC；
