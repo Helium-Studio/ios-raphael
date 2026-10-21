@@ -213,7 +213,11 @@ CI [39615436048](https://github.com/HeliumStudio-Dev/ios-raphael/actions/runs/39
 分配失败、非连续物理页、已有stream/上下文、寄存器和路由写入失败、TCM写入失败、
 TLB排空/路由撤除失败时保留内存，以及整个时钟→装载→上下文→恢复链路。
 五个翻译单元本地arm64编译通过；ADT往返/坏固件拒绝、补丁重建和仓库结构检查通过。
-真机测试待完成。GMU全程保持复位，本轮仍不能证明硬件页表遍历、固件执行或GPU渲染。
+CI [39620456482](https://github.com/HeliumStudio-Dev/ios-raphael/actions/runs/39620456482)
+已通过，源码 `fc4b2e2`。2026-10-21 23:01临时启动成功；
+镜像SHA256为 `23d906fb43421171a14b5e881024ed206f33dfbcba34ca9a1db946261f5d3994`。
+锁屏/输入与持久测试日志待确认；不能从fastboot成功推断装载或上下文测试通过。
+GMU全程保持复位，本轮仍不能证明硬件页表遍历、固件执行或GPU渲染。
 正式释放复位前还需完成RPMh ARC/BCM、RSC/PDC、DMA缓存属性和fault中断处理。
 
 后续执行参数已核对到本机固件：DTCM `0x43fe0` 的版本字为 `0x20000105`，
