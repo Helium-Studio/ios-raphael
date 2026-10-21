@@ -157,7 +157,12 @@ GCC memnoc/dvm及GPUCC AHB时钟均启用时才访问SMMU；不尝试开启共�
 CI [39611757924](https://github.com/HeliumStudio-Dev/ios-raphael/actions/runs/39611757924)
 已通过，源码 `bcfdce1`；0088于2026-10-21 22:02临时启动，镜像SHA256为
 `d9b8446591f8a15838ddf4ad5f17baab2627afd424b1d802acd0a03a29ba315b`。
-fastboot发送/启动成功，锁屏和SMMU持久日志尚待确认。
+用户已确认锁屏、触控和按键正常。README日志217998字节、flush72，八核检查通过，未记录到panic。
+CX上电后memnoc/dvm分别为 `0x221/1`，SMMU可读：IDR0=`0x4c017e06`、
+IDR1=`0x20000005`、IDR2=`0x5555`、sCR0=`0x240406`、GFSR=0。
+实际为4KiB寄存器页、5个上下文、6个流槽；没有有效SMR，5个SCTLR.M均为0。
+关闭上下文的TTBR/TCR呈未初始化值，不能据此认定有可复用映射。
+探测完整结束，CX控制位恢复并确认关闭。尚未配置SMMU或启动DMA。
 
 ## 接下来的通过条件
 
