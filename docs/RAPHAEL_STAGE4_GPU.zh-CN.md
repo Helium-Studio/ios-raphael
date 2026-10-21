@@ -73,6 +73,13 @@ DTCM、DCACHE，完整消费37680字节，截断输入被拒绝。A740的大 ica
 把 A640 的 DTCM 接受为外部 icache，因此“解析通过”不能替代正确的板级内存布局。
 详见私有 `research/raphael-gpu-firmware/gmu-plan.json`。
 
+分配器也需要随加载器一起修改：上游 `NativeAdrenoGmuDefaultSizes` / `AssembleGmuConfig`
+把icache固定为 `0xffc000` 且没有dcache对象；本地Linux的A640分支分别分配
+`0x4000..0x40000` 和 `0x44000..0x80000`，每块 `0x3c000` 字节。
+中间的DTCM通过MMIO装入。两块缓存范围均为16KiB对齐，可由完整CPU页拥有，
+再切为4KiB SMMU叶子；页属性修改仍须按XNU的 `PAGE_SHIFT` 处理，
+不能沿用上游 `pmap_set_cache_attributes(pa >> 12)` 的页号。
+
 Recovery command-db 已读到 `cx.lvl=0x30000`、`mx.lvl=0x30010`、`gfx.lvl=0x30050`，
 及各资源的实际 corner 表；BCM MC0/SH0 等表也已保存。
 现有 `sweet_rpmh.c` 只接受 VRM 电压资源，不能把 ARC corner 当毫伏写入。
