@@ -10,6 +10,7 @@ import adt
 
 
 def check(image, touch=False, keys=False, cpus=1, gpu=False):
+    assert gpu in (0, 1, 2), 'unsupported GPU test mode'
     assert cpus in (1, 4, 8), 'unsupported CPU bring-up profile'
     assert touch or (not keys and cpus == 1), 'keys/SMP profiles must retain touch'
     assert not gpu or (touch and keys and cpus == 8), 'GPU probe must retain the verified input/SMP profile'
@@ -21,7 +22,9 @@ def check(image, touch=False, keys=False, cpus=1, gpu=False):
     payload = image[offset:offset + ramdisk_size]
     assert len(payload) == ramdisk_size and payload[:8] == b'SWEETXNU', 'invalid payload'
     if gpu:
-        assert b'RAPHAEL GPU: A640 read-only probe;' in payload, 'kernel lacks the A640 probe'
+        assert any(x in payload for x in (b'RAPHAEL GPU: A640 read-only probe;', b'RAPHAEL GPU: A640 probe;')), 'kernel lacks the A640 probe'
+        if gpu == 2:
+            assert b'RAPHAEL GPU: CX test begin;' in payload, 'kernel lacks the CX power test'
     adt_off, adt_size = struct.unpack_from('<2Q', payload, 0x20)
     assert adt_off + adt_size <= len(payload), 'truncated ADT'
     root, _ = adt.parse(payload[adt_off:adt_off + adt_size])
@@ -53,7 +56,9 @@ def check(image, touch=False, keys=False, cpus=1, gpu=False):
     pairs = [arg.split('=', 1) for arg in args if '=' in arg]
     assert len({key for key, _ in pairs}) == len(pairs), 'duplicate boot arguments'
     options = dict(pairs)
-    assert options.get('raphaelgpu', '0') == ('1' if gpu else '0'), 'wrong GPU probe setting'
+    assert options.get('raphaelgpu', '0') == str(int(gpu)), 'wrong GPU probe setting'
+    if gpu == 2:
+        assert options.get('ufslogsecs') == '1', 'CX test needs the 1s log checkpoint'
     required = dict(rd='ufsroot0', ufsroot='userdata', ufsrw='1', rootrw='1', cpus=str(cpus),
                     sweetlog='1', sweetkeys='1' if keys else '0', sweettouch='1' if touch else '0', sweetusb='0',
                     sweetbattery='0', sweetfb_noconsole='1', ignition_level='1',
@@ -70,6 +75,8 @@ if __name__ == '__main__':
     parser.add_argument('--touch', action='store_true', help='require the stage-three touch test')
     parser.add_argument('--keys', action='store_true', help='require the raphael PM8150 key driver')
     parser.add_argument('--cpus', type=int, choices=(1, 4, 8), default=1)
-    parser.add_argument('--gpu-probe', action='store_true', help='require read-only A640 diagnostics')
+    gpu = parser.add_mutually_exclusive_group()
+    gpu.add_argument('--gpu-probe', dest='gpu', action='store_const', const=1, default=0, help='require read-only A640 diagnostics')
+    gpu.add_argument('--gpu-cx-test', dest='gpu', action='store_const', const=2, help='require reversible CX/XO register-access test')
     args = parser.parse_args()
-    print(f'PASS: raphael / userdata rw / touch={args.touch} / keys={args.keys} / cpus={args.cpus} / gpu-probe={args.gpu_probe}; SHA256 {check(args.image.read_bytes(), args.touch, args.keys, args.cpus, args.gpu_probe)}')
+    print(f'PASS: raphael / userdata rw / touch={args.touch} / keys={args.keys} / cpus={args.cpus} / gpu={args.gpu}; SHA256 {check(args.image.read_bytes(), args.touch, args.keys, args.cpus, args.gpu)}')

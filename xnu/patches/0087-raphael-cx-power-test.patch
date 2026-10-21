@@ -1,0 +1,129 @@
+--- a/bsd/dev/sweet_gpu.c
++++ b/bsd/dev/sweet_gpu.c
+@@ -1,14 +1,16 @@
+ /*
+- * Raphael A640 bring-up snapshot. MMIO reads only; never start DMA or publish
++ * Raphael A640 bring-up. Never start DMA or publish
+  * IOAcceleratorES until the command processor and userspace backend work.
+  * Off domains are not probed: an unpowered register read may hang the SoC.
+  */
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+ #include <sys/param.h>
+ #include <sys/systm.h>
++#include <kern/clock.h>
+ #include <pexpert/pexpert.h>
+ #include <pexpert/device_tree.h>
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
++extern int hz;
+ void sweet_gpu_probe(void);
+ 
+ static bool
+@@ -43,14 +45,97 @@
+ 	return cbcr != 0xffffffffu && (cbcr & 1u) && (!(cbcr & (1u << 31)) || (cbcr & 2u));
+ }
+ 
++static void
++gpu_update(vm_offset_t bank, unsigned off, uint32_t mask, uint32_t value)
++{
++	uint32_t old = gpu_rd(bank, off), next = (old & ~mask) | (value & mask);
++	if (old == next) { return; }
++	__asm__ volatile("dmb oshst" ::: "memory");
++	*(volatile uint32_t *)(bank + off) = next;
++	__asm__ volatile("dsb osh" ::: "memory");
++}
++
++static bool
++gpu_poll(vm_offset_t bank, unsigned off, uint32_t mask, uint32_t value)
++{
++	for (unsigned i = 0; i < 2000; ++i) {
++		uint32_t v = gpu_rd(bank, off);
++		if (v != 0xffffffffu && (v & mask) == value) { return true; }
++		delay(1);
++	}
++	return false;
++}
++
++static void
++gpu_cx_test(vm_offset_t cc)
++{
++	int log_secs = 0;
++	(void)PE_parse_boot_argn("ufslogsecs", &log_secs, sizeof(log_secs));
++	if (log_secs != 1) { printf("RAPHAEL GPU: CX test requires ufslogsecs=1\n"); return; }
++	uint32_t cx = gpu_rd(cc, 0x106c), hw = gpu_rd(cc, 0x1540);
++	uint32_t ahb = gpu_rd(cc, 0x1078), cxo = gpu_rd(cc, 0x109c), gmu = gpu_rd(cc, 0x1098);
++	/* Only take an idle software-controlled CX; leave GX and shared rails alone. */
++	if (cx == 0xffffffffu || hw == 0xffffffffu || ahb == 0xffffffffu ||
++	    cxo == 0xffffffffu || gmu == 0xffffffffu || ((cx | hw) & (1u << 31)) ||
++	    (cx & 7u) != 1u || (gpu_rd(cc, 0x1124) & 0x371fu) != 0) {
++		printf("RAPHAEL GPU: CX test refused: not idle SW CX / XO GMU source\n");
++		return;
++	}
++	printf("RAPHAEL GPU: CX test begin; XO only, no firmware/GX/DMA\n");
++	/* Let the 1s persistent logger save the checkpoint before power changes. */
++	int checkpoint = 0;
++	(void)tsleep(&checkpoint, PZERO, "gpucxlog", 3 * hz);
++	/* Linux gdsc: clear HW/SW override, wait fields 2/8/2, then collapse=0. */
++	gpu_update(cc, 0x106c, 0xfff007u, 0x282001u);
++	gpu_update(cc, 0x106c, 1u, 0);
++	delay(1);
++	bool on = gpu_poll(cc, 0x1540, 1u << 31, 1u << 31);
++	delay(1);
++	printf("RAPHAEL GPU: CX test power=%u GDSCR=%#x HW=%#x\n",
++	    on, gpu_rd(cc, 0x106c), gpu_rd(cc, 0x1540));
++	if (on && (gpu_rd(cc, 0x106c) & (1u << 31))) {
++		gpu_update(cc, 0x1078, 1u, 1u);
++		gpu_update(cc, 0x109c, 1u, 1u);
++		gpu_update(cc, 0x1098, 1u, 1u);
++		delay(10);
++		bool clocks = gpu_poll(cc, 0x1098, 1u << 31, 0) &&
++		    gpu_clock_live(gpu_rd(cc, 0x1078)) && gpu_clock_live(gpu_rd(cc, 0x109c));
++		printf("RAPHAEL GPU: CX test clocks=%u AHB=%#x CXO=%#x GMU=%#x RCG=%#x/%#x\n",
++		    clocks, gpu_rd(cc, 0x1078), gpu_rd(cc, 0x109c), gpu_rd(cc, 0x1098),
++		    gpu_rd(cc, 0x1120), gpu_rd(cc, 0x1124));
++		if (clocks) {
++			vm_offset_t m = ml_io_map(0x02c68000, 0x34000);
++			if (m) {
++				m += 0x2000;
++				printf("RAPHAEL GPU: CX test GMU reset=%#x init=%#x busy=%#x power=%#x retention=%#x\n",
++				    gpu_rd(m, 0x14000), gpu_rd(m, 0x14070), gpu_rd(m, 0x14068),
++				    gpu_rd(m, 0x14340), gpu_rd(m, 0x14730));
++			} else { printf("RAPHAEL GPU: CX test GMU map failed\n"); }
++		}
++	}
++	/* Restore only our control bits; status bits belong to hardware. */
++	gpu_update(cc, 0x1098, 1u, gmu);
++	gpu_update(cc, 0x109c, 1u, cxo);
++	gpu_update(cc, 0x1078, 1u, ahb);
++	gpu_update(cc, 0x106c, 1u, cx);
++	delay(500);
++	bool off = gpu_poll(cc, 0x1540, 1u << 31, 0);
++	gpu_update(cc, 0x106c, 0xfff006u, cx);
++	bool restored = (gpu_rd(cc, 0x106c) & 0xfff007u) == (cx & 0xfff007u) &&
++	    (gpu_rd(cc, 0x1098) & 1u) == (gmu & 1u) &&
++	    (gpu_rd(cc, 0x109c) & 1u) == (cxo & 1u) && (gpu_rd(cc, 0x1078) & 1u) == (ahb & 1u);
++	printf("RAPHAEL GPU: CX test restored=%u off=%u GDSCR=%#x HW=%#x; no accelerator\n",
++	    restored, off, gpu_rd(cc, 0x106c), gpu_rd(cc, 0x1540));
++}
++
+ void
+ sweet_gpu_probe(void)
+ {
+ 	int enabled = 0;
+ 	(void)PE_parse_boot_argn("raphaelgpu", &enabled, sizeof(enabled));
+-	if (!enabled || !gpu_is_raphael()) { return; }
+-	printf("RAPHAEL GPU: A640 read-only probe; CPU page=%lu TCR=%#llx\n",
+-	    (unsigned long)PAGE_SIZE, __builtin_arm_rsr64("TCR_EL1"));
++	if ((enabled != 1 && enabled != 2) || !gpu_is_raphael()) { return; }
++	printf("RAPHAEL GPU: A640 probe; CPU page=%lu TCR=%#llx mode=%d\n",
++	    (unsigned long)PAGE_SIZE, __builtin_arm_rsr64("TCR_EL1"), enabled);
+ 	vm_offset_t gcc = ml_io_map(0x00100000, 0x100000);
+ 	if (!gcc) { printf("RAPHAEL GPU: GCC map failed\n"); return; }
+ 	uint32_t cfg = gpu_rd(gcc, 0x71004), mem = gpu_rd(gcc, 0x7100c);
+@@ -70,6 +155,7 @@
+ 	printf("RAPHAEL GPU: GPUCC cx=%#x gx=%#x ahb=%#x gmu=%#x cxo=%#x\n", cx, gx, ahb, gmu, cxo);
+ 	printf("RAPHAEL GPU: GMU RCG=%#x/%#x CX_HW=%#x GX_CFG=%#x GX_CLAMP=%#x\n",
+ 	    gpu_rd(cc, 0x1120), gpu_rd(cc, 0x1124), cx_hw, gx_cfg, clamp);
++	if (enabled == 2) { gpu_cx_test(cc); return; }
+ 	/* Linux polls CX HW_CTRL bit31 and GX CFG_GDSCR bit16, not requests. */
+ 	if (cx_on && gpu_clock_live(ahb) && gpu_clock_live(gmu) && gpu_clock_live(cxo)) {
+ 		vm_offset_t m = ml_io_map(0x02c68000, 0x34000);

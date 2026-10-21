@@ -93,11 +93,33 @@ fastboot boot shim/out/raphael-stage3.img
 并检查模拟 MMIO 保持原值、全1无效状态被拒绝；本地 GPU/UFS 两个文件交叉编译通过。
 真机启动结果与 CI 信息持续记录在 `NOTES.md`，未获日志前不宣称探测通过。
 
-2026-10-21 21:07 已临时启动首个探测镜像，发送与启动均OKAY，尚待屏幕反馈和持久日志。
+2026-10-21 21:07 已临时启动首个探测镜像，用户确认锁屏、触控和按键正常。
 CI [39443279478](https://github.com/HeliumStudio-Dev/ios-raphael/actions/runs/39443279478)
 通过，内核源码为 `3af6f55`；镜像 `shim/out/raphael-0086-gpu-probe.img` 的SHA256为
 `4d83c4ca3d5a15fc7ade5cf4f4018a080e8fca9391f89acd5449ffcbdb02fd92`。
 该镜像保留八核、触控与按键；没有安装Metal插件，也没有刷写分区。
+
+随后按README从Recovery取得新日志（212334字节，flush31）：八核SGI1均通过，
+没有记录到panic，GPU探测完整结束。GPUCC的CX/GX均为 `0x222001`，
+CX_HW=`0x5ff4`、GX_CFG=`0x88400`、clamp=`0x3c0001`；两域均未上电。
+GMU分支为 `0x80004220`，RCG为 `0x80000000/0`，尚未启用。
+配置AHB可读，但GMU/GX/SMMU均按门控跳过；这不是已启动GPU。
+
+## 0087：CX 上电与回退测试（待真机验证）
+
+`--gpu-cx-test` 使用 `raphaelgpu=2 ufslogsecs=1`，保留输入/八核配置。
+只接受未上电、软件控制的CX和GMU源仍为XO的状态；先等待3秒让日志保存检查点。
+依照本地Linux的GDSC时序设置wait2/8/2，解除CX collapse并等待HW完成位；
+成功后启用本地AHB/CXO/GMU分支，确认时钟状态后读取GMU，最后恢复控制位并检查CX关闭。
+失败路径同样回退，所有轮询均有上限。此测试含GPUCC控制寄存器写入，
+不写电压/频率、GX、SMMU或固件，不启动DMA，也不发布accelerator。
+
+```sh
+bash tools/build-raphael-stage2.sh KERNEL RAPHAEL_DTB --touch --keys --cpus 8 --gpu-cx-test
+```
+
+主机测试直接运行C实现，覆盖上电/时钟/掉电超时、映射失败、拒绝未知状态和控制位恢复；
+实际硬件能否上电及安全访问仍须用临时启动与持久日志验证。
 
 ## 接下来的通过条件
 
