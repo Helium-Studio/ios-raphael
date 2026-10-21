@@ -183,6 +183,11 @@ IDR1=`0x20000005`、IDR2=`0x5555`、sCR0=`0x240406`、GFSR=0。
 三个翻译单元本地arm64交叉编译通过。真机结果待验证；200MHz由寄存器配置推算，未做频率测量。
 本轮不写SMMU上下文/路由，不释放GMU复位，不装入固件、不启动DMA或发布accelerator。
 
+CI [39615436048](https://github.com/HeliumStudio-Dev/ios-raphael/actions/runs/39615436048)
+已通过，源码 `0448a42`。0089于2026-10-21 22:31临时启动，发送/启动均成功；
+镜像SHA256为 `1c4e6b840f7e3d3027c8b8d436361ed56bd6cbe5f9b44a7e1ed7a201a249c831`。
+锁屏与合并测试持久日志待确认；不能据此宣称200MHz、TCM或GPU渲染已通过真机验证。
+
 ## 接下来的通过条件
 
 按实际探测结果完成 A640 CX 电源、200MHz GMU 时钟、RPMh ARC/BCM 投票和 RSC/PDC；
