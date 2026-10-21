@@ -20,6 +20,16 @@ Metal 插件、metal2vulkan/AIR 编译、Turnip 和显示交接；当前 iOS 根
 `sizeof(IOService)==136` 检查也在当前XNU8796头文件下交叉编译通过。
 这些是可行性证据，仍未审计完整vtable或装入原始IOGPUFamily父类，也未运行插件。
 
+进一步检查 [NativeMetal 源码](https://github.com/UniXNU/NativeMetal/tree/6dcd4cbb69eb5625988706de42aa8ad3009b8ee7)：
+`NativeBridgeMetalFrontend.mm` 按 iPadOS17.7.11 要求 `_MTLDevice` 实例大小为536字节；
+本地20H392缓存的 Objective-C `class_ro_t.instanceSize` 实测为528字节，原样移植会返回nil。
+`NativeAdrenoMetalPlugin.mm` 的 `reportDisplayState`/`sampleDisplay` 还使用特定QuartzCore
+版本的绝对地址与对象偏移，并通过 `vm_write` 修改显示状态，不能直接在20H392启用。
+适配时须核对本机Metal私有协议与方法签名、重新验证显示格式处理，不能只改大小断言。
+该插件通过 `IOAcceleratorES → MetalPluginName → initWithAcceleratorPort:` 进入；
+默认只运行异步测试并返回nil，旁置 `.publish` 文件才发布真实设备。
+只有GPU测试、Turnip设备创建与iOS16 ABI验证通过后，才应安装和开启发布模式。
+
 | 项目 | NativeAdreno / sheng | raphael 实测与本地 Linux 参考 |
 | --- | --- | --- |
 | GPU | Adreno 740 / SM8550 | Adreno640v2，live DT chip ID `0x06040001` |
