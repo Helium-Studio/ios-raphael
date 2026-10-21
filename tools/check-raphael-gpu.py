@@ -18,10 +18,23 @@ code = r'''
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include "ArmSmmu4K.h"
 typedef uintptr_t vm_offset_t;
+typedef uint32_t ppnum_t;
+typedef int kern_return_t;
 typedef int DTEntry;
 #define kSuccess 0
 #define PAGE_SIZE 16384
+#define PAGE_SHIFT 14
+#define PAGE_MASK (PAGE_SIZE-1)
+#define KERN_SUCCESS 0
+#define KMA_DATA 1
+#define KMA_ZERO 2
+#define VM_KERN_MEMORY_IOKIT 3
+#define TRUE 1
+#define kernel_map 1
+#define kernel_pmap 2
+#define ptoa_64(x) ((uint64_t)(x)<<PAGE_SHIFT)
 #define PZERO 0
 #define hz 100
 #define __builtin_arm_rsr64(x) 0ULL
@@ -29,6 +42,26 @@ static uint32_t gcc[0x100000/4], cc[0xc000/4], gmu[0x34000/4], gpu[0x40000/4], s
 static int enabled, maps, missing, failmap;
 static int model, power_fail, clock_fail, off_fail, gmu_failmap, log_secs=1, writes, sleeps, delays;
 static int bus_fail, smmu_failmap, smmu_reads, context_reads;
+static int alloc_fail, physical_fail, allocated, cleaned, freed, rcg_fail, xo_fail, tcm_fail, tcm_writes;
+static _Alignas(16384) uint8_t arena[32768];
+static kern_return_t kmem_alloc_contig(int map,uintptr_t *v,size_t n,uintptr_t mask,ppnum_t max,ppnum_t pmask,int flags,int tag) {
+    assert(map==kernel_map && n==sizeof(arena) && mask==PAGE_MASK && max==(((1ull<<40)-1)>>PAGE_SHIFT) && !pmask && flags==(KMA_DATA|KMA_ZERO) && tag==VM_KERN_MEMORY_IOKIT && !allocated);
+    if(alloc_fail)return 5;
+    *v=(uintptr_t)arena;memset(arena,0,sizeof(arena));allocated=1;return 0;
+}
+static ppnum_t pmap_find_phys(int pmap,uintptr_t v) {
+    assert(pmap==kernel_pmap && allocated && (v==(uintptr_t)arena || v==(uintptr_t)arena+PAGE_SIZE));
+    return ((0x104000000ull+(v-(uintptr_t)arena))>>PAGE_SHIFT) ^ ((physical_fail && v!=(uintptr_t)arena) ? 8u : 0u);
+}
+static void clean_dcache64(uint64_t pa,size_t n,int phys) {
+    assert(allocated && pa==0x104000000ull && n==sizeof(arena) && phys==TRUE);
+    const uint32_t *payload=(const uint32_t *)(arena+PAGE_SIZE);
+    for(unsigned i=0;i<PAGE_SIZE/4;i++)assert(payload[i]==(0x64000000u^i));
+    ++cleaned;
+}
+static void kmem_free(int map,uintptr_t v,size_t n) {
+    assert(map==kernel_map && v==(uintptr_t)arena && n==sizeof(arena) && allocated);allocated=0;++freed;
+}
 static const char *compatible;
 static unsigned length;
 static int PE_parse_boot_argn(const char *k, void *v, int n) {
@@ -38,10 +71,20 @@ static int PE_parse_boot_argn(const char *k, void *v, int n) {
     return 1;
 }
 static void model_write(uintptr_t bank,unsigned off,uint32_t value) {
-    assert(model && bank==(uintptr_t)cc);
-    uint32_t mask=off==0x106c ? 0xfff007u : off==0x1078 || off==0x1098 || off==0x109c ? 1u : 0u;
-    assert(mask && !((cc[off/4]^value)&~mask));
-    cc[off/4]=value; ++writes;
+    assert(model);
+    if(bank==(uintptr_t)gmu+0x2000) {
+        assert((off>=0x6fe0 && off<0x7000) || (off>=0xafe0 && off<0xb000));
+        assert((cc[0x1540/4]&(1u<<31)) && (cc[0x1124/4]&0x371f)==0x602 && gmu[0x16000/4]==1);
+        if(!(tcm_fail && off==0x6fe0 && value==0xa6400000u))gmu[(off+0x2000)/4]=value;
+        ++tcm_writes;
+    } else {
+        assert(bank==(uintptr_t)cc || bank==(uintptr_t)gcc);
+        uint32_t *b=(uint32_t *)bank;
+        uint32_t mask=bank==(uintptr_t)gcc ? (off==0x52004 ? 1u<<16 : 0) : off==0x106c ? 0xfff007u : off==0x1124 ? 0x371fu : off==0x1120 || off==0x1078 || off==0x1098 || off==0x109c ? 1u : 0u;
+        assert(mask && !((b[off/4]^value)&~mask));
+        b[off/4]=value;
+    }
+    ++writes;
 }
 static uint32_t model_read(uintptr_t address) {
     uint32_t *banks[]={gcc,cc,gmu,gpu,smmu};
@@ -57,7 +100,7 @@ static uint32_t model_read(uintptr_t address) {
     assert(0); return 0;
 }
 static int tsleep(void *channel,int priority,const char *name,int ticks) {
-    (void)channel; assert(priority==PZERO && (!strcmp(name,"gpucxlog") || !strcmp(name,"gpusmmulog")) && ticks==3*hz); ++sleeps; return 0;
+    (void)channel; assert(priority==PZERO && (!strcmp(name,"gpucxlog") || !strcmp(name,"gpusmmulog") || !strcmp(name,"gmupreplog")) && ticks==3*hz); ++sleeps; return 0;
 }
 static void delay(unsigned n) {
     (void)n; assert(++delays<10000);
@@ -76,6 +119,9 @@ static void delay(unsigned n) {
         if((cc[0x1540/4]&(1u<<31)) && (*v&1) && !bus_fail)*v&=~(1u<<31);
         else *v|=1u<<31;
     }
+    if((cc[0x1120/4]&1) && !((cc[0x1124/4]&0x371f)==0x602 ? rcg_fail : xo_fail))cc[0x1120/4]&=~1u;
+    if((cc[0x1540/4]&(1u<<31)) && (cc[0x1098/4]&1) && !clock_fail)cc[0x1120/4]&=~(1u<<31);
+    else cc[0x1120/4]|=1u<<31;
 }
 static int SecureDTLookupEntry(void *a,const char *b,DTEntry *r) { (void)a; (void)b; *r=0; return missing; }
 static int SecureDTGetProperty(DTEntry r,const char *k,const void **p,unsigned *n) { (void)r; (void)k; *p=compatible; *n=length; return 0; }
@@ -104,11 +150,13 @@ static void reset_cx(void) {
     enabled=2; model=1; maps=writes=sleeps=delays=0;
     power_fail=clock_fail=off_fail=gmu_failmap=0; log_secs=1;
     bus_fail=smmu_failmap=smmu_reads=context_reads=0;
+    alloc_fail=physical_fail=cleaned=freed=rcg_fail=xo_fail=tcm_fail=tcm_writes=0;assert(!allocated);
+    gcc[0]=0xd010003d;gcc[4/4]=0x1f;gcc[0x40/4]=0x4000;gcc[0xc/4]=0x103;gcc[0x52004/4]=0x0160597f;
     gcc[0x7100c/4]=0x80000221; gcc[0x71018/4]=0x80000001;
     gmu[0x16000/4]=1; /* GMU remains held in reset throughout. */
     memset(smmu,0,sizeof(smmu));
     smmu[0x20/4]=(1u<<30)|(1u<<27)|128u;
-    smmu[0x24/4]=(2u<<28)|8u; smmu[0x28/4]=1u<<12;
+    smmu[0x24/4]=(2u<<28)|8u; smmu[0x28/4]=(1u<<12)|0x55u;
     smmu[0x800/4]=0x84000005; smmu[0xc00/4]=1;
     memcpy(saved_smmu,smmu,sizeof(smmu));
     memset(cc,0,sizeof(cc));
@@ -151,13 +199,15 @@ int main(void) {
     for(unsigned i=0;i<sizeof(gpu)/4;i++)assert(!gpu[i]);
     for(unsigned i=0;i<sizeof(smmu)/4;i++)assert(!smmu[i]);
     reset_cx(); sweet_gpu_probe();
-    assert(maps==4 && writes>0 && sleeps==2 && context_reads>0 && !memcmp(saved,cc,sizeof(cc)));
+    assert(maps==4 && writes>0 && sleeps==3 && context_reads>0 && !memcmp(saved,cc,sizeof(cc)));
+    assert(cleaned==1 && freed==1 && tcm_writes==32 && gcc[0x52004/4]==0x0160597f);
     assert(!memcmp(saved_smmu,smmu,sizeof(smmu)));
     assert(gcc[0x7100c/4]==0x80000221 && gcc[0x71018/4]==0x80000001);
     reset_cx(); bus_fail=1; sweet_gpu_probe();
-    assert(maps==3 && sleeps==1 && smmu_reads==0 && !memcmp(saved,cc,sizeof(cc)));
+    assert(maps==3 && sleeps==2 && smmu_reads==0 && !memcmp(saved,cc,sizeof(cc)));
+    assert(cleaned==0 && freed==0 && tcm_writes==32);
     reset_cx(); smmu_failmap=1; sweet_gpu_probe();
-    assert(maps==4 && sleeps==2 && smmu_reads==0 && !memcmp(saved,cc,sizeof(cc)));
+    assert(maps==4 && sleeps==3 && smmu_reads==0 && !memcmp(saved,cc,sizeof(cc)));
     reset_cx(); gmu[0x16000/4]=0; sweet_gpu_probe();
     assert(maps==3 && sleeps==1 && smmu_reads==0 && !memcmp(saved,cc,sizeof(cc)));
     unsigned bad_id1[]={0xffffffffu,0x80000008,0x30000008,0x20000000,0x20000009,0x20090008};
@@ -174,6 +224,22 @@ int main(void) {
     assert(smmu_reads>0 && context_reads==0 && !memcmp(saved,cc,sizeof(cc)));
     reset_cx(); smmu[0]=8; sweet_gpu_probe(); /* Extended stream IDs use different valid bits. */
     assert(smmu_reads>0 && context_reads==0 && !memcmp(saved,cc,sizeof(cc)));
+    reset_cx(); alloc_fail=1; sweet_gpu_probe();
+    assert(!allocated && !cleaned && !freed && tcm_writes==32 && !memcmp(saved,cc,sizeof(cc)));
+    reset_cx(); physical_fail=1; sweet_gpu_probe();
+    assert(!allocated && !cleaned && freed==1 && !memcmp(saved,cc,sizeof(cc)));
+    reset_cx(); smmu[0x28/4]=1u<<12; sweet_gpu_probe();
+    assert(!allocated && !cleaned && !freed && tcm_writes==32 && !memcmp(saved,cc,sizeof(cc)));
+    reset_cx(); rcg_fail=1; sweet_gpu_probe();
+    assert(!tcm_writes && cleaned==1 && freed==1 && !memcmp(saved,cc,sizeof(cc)) && gcc[0x52004/4]==0x0160597f);
+    reset_cx(); xo_fail=1; sweet_gpu_probe();
+    assert(tcm_writes==32 && (cc[0x1120/4]&1) && (cc[0x1124/4]&0x371f)==0 && gcc[0x52004/4]==0x0160597f);
+    reset_cx(); tcm_fail=1; sweet_gpu_probe();
+    assert(tcm_writes>0 && !memcmp(saved,cc,sizeof(cc)));
+    reset_cx(); gcc[4/4]=0x20; sweet_gpu_probe();
+    assert(tcm_writes==0 && cleaned==1 && !memcmp(saved,cc,sizeof(cc)));
+    reset_cx(); gcc[0x52004/4]|=1u<<16; sweet_gpu_probe();
+    assert(tcm_writes==32 && gcc[0x52004/4]==(0x0160597f|1u<<16) && !memcmp(saved,cc,sizeof(cc)));
     reset_cx(); power_fail=1; sweet_gpu_probe();
     assert(maps==2 && sleeps==1 && !memcmp(saved,cc,sizeof(cc)));
     reset_cx(); clock_fail=1; sweet_gpu_probe();
@@ -188,6 +254,7 @@ int main(void) {
     reset_cx(); cc[0x1124/4]=0x602; sweet_gpu_probe(); assert(writes==0 && sleeps==0);
     reset_cx(); cc[0x1540/4]=0xffffffffu; sweet_gpu_probe(); assert(writes==0 && sleeps==0);
     reset_cx(); cc[0x1098/4]=0xffffffffu; sweet_gpu_probe(); assert(writes==0 && sleeps==0);
+    reset_cx(); gcc[0x52004/4]=0xffffffffu; sweet_gpu_probe(); assert(writes==0 && sleeps==0);
     reset_cx(); enabled=3; sweet_gpu_probe(); assert(maps==0 && writes==0);
     for(unsigned i=0;i<sizeof(gmu)/4;i++)assert(gmu[i]==(i==0x16000/4 ? 1u : 0u));
     for(unsigned i=0;i<sizeof(gpu)/4;i++)assert(!gpu[i]);
@@ -197,7 +264,8 @@ int main(void) {
 with tempfile.TemporaryDirectory(prefix='raphael-gpu-') as tmp:
     c, exe = Path(tmp) / 'check.c', Path(tmp) / 'check'
     c.write_text(code)
+    dev = Path(sys.argv[1]) / 'bsd/dev'
     subprocess.run([os.environ.get('CC', 'cc'), '-Wall', '-Wextra', '-Werror',
-                    '-fsanitize=address,undefined', '-g', str(c), '-o', str(exe)], check=True)
+                    '-fsanitize=address,undefined', '-g', '-I', str(dev), str(c), str(dev / 'ArmSmmu4K.c'), '-o', str(exe)], check=True)
     subprocess.run([str(exe)], check=True, stdout=subprocess.DEVNULL)
-print('PASS: A640 gates, CX rollback, SMMU geometry/routes/map failure/clock and reset gates; no SMMU/GX/DMA writes (ASan/UBSan)')
+print('PASS: A640 gates/rollback, SMMU geometry, owned 16K/4K tables, 200MHz/TCM restore and failure paths; no SMMU/GX/DMA writes (ASan/UBSan)')

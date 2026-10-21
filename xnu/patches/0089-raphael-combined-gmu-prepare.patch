@@ -1,0 +1,413 @@
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -108,6 +108,7 @@
+ bsd/dev/sweet_sample.c			standard
+ bsd/dev/sweet_keys.c			standard
+ bsd/dev/sweet_gpu.c			standard
++bsd/dev/ArmSmmu4K.c			standard
+ bsd/dev/sweet_touch.c			standard
+ bsd/dev/sweet_rpmh.c			standard
+ bsd/dev/sweet_spmi.c			standard
+--- a/bsd/dev/sweet_gpu.c
++++ b/bsd/dev/sweet_gpu.c
+@@ -9,7 +9,12 @@
+ #include <kern/clock.h>
+ #include <pexpert/pexpert.h>
+ #include <pexpert/device_tree.h>
++#include <vm/vm_kern.h>
++#include <vm/pmap.h>
++#include <arm/caches_internal.h>
++#include "ArmSmmu4K.h"
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
++extern ppnum_t pmap_find_phys(pmap_t, addr64_t);
+ extern int hz;
+ void sweet_gpu_probe(void);
+ 
+@@ -66,7 +71,7 @@
+ 	return false;
+ }
+ 
+-static void
++static vm_offset_t
+ gpu_smmu_snapshot(vm_offset_t gcc, vm_offset_t cc)
+ {
+ 	uint32_t mem = gpu_rd(gcc, 0x7100c), dvm = gpu_rd(gcc, 0x71018);
+@@ -75,13 +80,13 @@
+ 	if (!gpu_clock_live(mem) || !gpu_clock_live(dvm) ||
+ 	    !gpu_clock_live(gpu_rd(cc, 0x1078))) {
+ 		printf("RAPHAEL GPU: SMMU snapshot skipped: bus clocks off\n");
+-		return;
++		return 0;
+ 	}
+ 	printf("RAPHAEL GPU: SMMU snapshot begin; GMU held reset, no SMMU writes\n");
+ 	int checkpoint = 0;
+ 	(void)tsleep(&checkpoint, PZERO, "gpusmmulog", 3 * hz);
+ 	vm_offset_t s = ml_io_map(0x02ca0000, 0x10000);
+-	if (!s) { printf("RAPHAEL GPU: SMMU map failed\n"); return; }
++	if (!s) { printf("RAPHAEL GPU: SMMU map failed\n"); return 0; }
+ 	uint32_t cr0 = gpu_rd(s, 0), id0 = gpu_rd(s, 0x20), id1 = gpu_rd(s, 0x24), id2 = gpu_rd(s, 0x28);
+ 	printf("RAPHAEL GPU: SMMU sCR0=%#x IDR0=%#x IDR1=%#x IDR2=%#x IDR7=%#x GFSR=%#x\n",
+ 	    cr0, id0, id1, id2, gpu_rd(s, 0x3c), gpu_rd(s, 0x48));
+@@ -93,7 +98,7 @@
+ 	    2 * half != 0x10000 || !banks || banks > half / page || s2 > banks ||
+ 	    !(id0 & (1u << 27)) || !groups || groups > 128 || cr0 == 0xffffffffu || (cr0 & 8u)) {
+ 		printf("RAPHAEL GPU: SMMU unsupported IDs/geometry; context reads skipped\n");
+-		return;
++		return 0;
+ 	}
+ 	printf("RAPHAEL GPU: SMMU geometry page=%#x half=%#x banks=%u s2=%u groups=%u\n",
+ 	    page, half, banks, s2, groups);
+@@ -113,6 +118,104 @@
+ 		    gpu_rd(cb, 0x24), gpu_rd(cb, 0x20), gpu_rd(cb, 0x2c), gpu_rd(cb, 0x28));
+ 	}
+ 	printf("RAPHAEL GPU: SMMU snapshot done; no route/context changes\n");
++	return s;
++}
++
++static void
++gpu_memory_test(vm_offset_t s)
++{
++	uint32_t id2 = s ? gpu_rd(s, 0x28) : 0;
++	unsigned oas = (id2 >> 4) & 15u;
++	if (!s || PAGE_SIZE != 0x4000 || !(id2 & (1u << 12)) || oas < 2 || oas > 5) {
++		printf("RAPHAEL GPU: memory test skipped: need 16K CPU / 4K SMMU / 40bit output\n");
++		return;
++	}
++	vm_offset_t v = 0;
++	kern_return_t kr = kmem_alloc_contig(kernel_map, &v, 2 * PAGE_SIZE, PAGE_MASK,
++	    ((1ull << 40) - 1) >> PAGE_SHIFT, 0, KMA_DATA | KMA_ZERO, VM_KERN_MEMORY_IOKIT);
++	if (kr != KERN_SUCCESS) { printf("RAPHAEL GPU: memory allocation failed=%d\n", kr); return; }
++	ppnum_t pn = pmap_find_phys(kernel_pmap, v), tail = pmap_find_phys(kernel_pmap, v + PAGE_SIZE);
++	uint64_t pa = ptoa_64(pn), data = ptoa_64(tail);
++	bool owned = pn && tail && !(pa & PAGE_MASK) && data == pa + PAGE_SIZE &&
++	    data <= (1ull << 40) - PAGE_SIZE;
++	bool walked = false;
++	ArmSmmu4KResult result = {0};
++	ArmSmmu4KStatus status = ArmSmmu4KBadRange;
++	if (owned) {
++		ArmSmmu4KConfig config = {32, 40, pa, 4};
++		ArmSmmu4KRange range = {0x4000, data, PAGE_SIZE, ArmSmmu4KRead | ArmSmmu4KWrite, 0, 2};
++		uint64_t *tables = (uint64_t *)v;
++		status = ArmSmmu4KBuild(&config, &range, 1, tables, PAGE_SIZE / 4096, &result);
++		walked = status == ArmSmmu4KSuccess && result.table_pages == 3 && result.leaf_pages == 4;
++		for (unsigned i = 0; walked && i < 4; ++i) {
++			uint64_t va = 0x4000 + 4096 * i, at = 0;
++			for (unsigned level = result.start_level; level <= 3; ++level) {
++				uint64_t entry = tables[at * 512 + ((va >> (39 - 9 * level)) & 511)];
++				uint64_t p = entry & 0x0000fffffffff000ull;
++				if ((entry & 3) != 3) { walked = false; break; }
++				if (level == 3) { walked = p == data + 4096 * i; }
++				else {
++					if (p < pa || p - pa >= result.table_pages * 4096) { walked = false; break; }
++					at = (p - pa) / 4096;
++				}
++			}
++		}
++		if (walked) {
++			uint32_t *payload = (uint32_t *)(v + PAGE_SIZE);
++			for (unsigned i = 0; i < PAGE_SIZE / 4; ++i) { payload[i] = 0x64000000u ^ i; }
++			clean_dcache64(pa, 2 * PAGE_SIZE, TRUE);
++		}
++	}
++	printf("RAPHAEL GPU: memory owned=%u build=%u walked=%u tables=%lu leaves=%lu; inactive, no DMA\n",
++	    owned, status, walked, (unsigned long)result.table_pages, (unsigned long)result.leaf_pages);
++	kmem_free(kernel_map, v, 2 * PAGE_SIZE);
++}
++
++static void
++gpu_gmu_test(vm_offset_t gcc, vm_offset_t cc, vm_offset_t m)
++{
++	uint32_t mode = gpu_rd(gcc, 0), l = gpu_rd(gcc, 4), alpha = gpu_rd(gcc, 0x40);
++	uint32_t user = gpu_rd(gcc, 0xc), cfg = gpu_rd(cc, 0x1124);
++	printf("RAPHAEL GPU: GMU prepare GPLL0 mode=%#x L=%#x alpha=%#x user=%#x vote=%#x\n",
++	    mode, l, alpha, user, gpu_rd(gcc, 0x52004));
++	if (mode == 0xffffffffu || !(mode & (1u << 31)) || l != 0x1f || alpha != 0x4000 ||
++	    (user & 0xf03u) != 0x103u || (cfg & 0x371fu) || (gpu_rd(cc, 0x1120) & 1u) ||
++	    gpu_rd(m, 0x14000) != 1u) {
++		printf("RAPHAEL GPU: GMU prepare refused: need locked 600MHz / div2 / XO / held reset\n");
++		return;
++	}
++	printf("RAPHAEL GPU: combined prepare begin; clock/TCM/memory only, no firmware execution\n");
++	int checkpoint = 0;
++	(void)tsleep(&checkpoint, PZERO, "gmupreplog", 3 * hz);
++	gpu_update(gcc, 0x52004, 1u << 16, 1u << 16);
++	delay(10);
++	/* Linux: GPLL0 even 300MHz, parent6 / HID=2 (divide1.5) -> 200MHz. */
++	gpu_update(cc, 0x1124, 0x371fu, 0x602u);
++	gpu_update(cc, 0x1120, 1u, 1u);
++	bool rate = gpu_poll(cc, 0x1120, 1u, 0) &&
++	    (gpu_rd(cc, 0x1124) & 0x371fu) == 0x602u && gpu_clock_live(gpu_rd(cc, 0x1098));
++	printf("RAPHAEL GPU: GMU 200MHz configured=%u RCG=%#x/%#x branch=%#x vote=%#x\n",
++	    rate, gpu_rd(cc, 0x1120), gpu_rd(cc, 0x1124), gpu_rd(cc, 0x1098), gpu_rd(gcc, 0x52004));
++	if (rate && gpu_rd(m, 0x14000) == 1u) {
++		unsigned offsets[2] = {0x6fe0, 0xafe0};
++		for (unsigned bank = 0; bank < 2; ++bank) {
++			uint32_t saved[8];
++			bool wrote = true, restored = true;
++			for (unsigned i = 0; i < 8; ++i) { saved[i] = gpu_rd(m, offsets[bank] + 4 * i); }
++			for (unsigned i = 0; i < 8; ++i) { gpu_update(m, offsets[bank] + 4 * i, 0xffffffffu, 0xa6400000u ^ (bank << 12) ^ i); }
++			for (unsigned i = 0; i < 8; ++i) { wrote &= gpu_rd(m, offsets[bank] + 4 * i) == (0xa6400000u ^ (bank << 12) ^ i); }
++			for (unsigned i = 0; i < 8; ++i) { gpu_update(m, offsets[bank] + 4 * i, 0xffffffffu, saved[i]); }
++			for (unsigned i = 0; i < 8; ++i) { restored &= gpu_rd(m, offsets[bank] + 4 * i) == saved[i]; }
++			printf("RAPHAEL GPU: GMU %s write=%u restored=%u reset=%#x\n",
++			    bank ? "DTCM" : "ITCM", wrote, restored, gpu_rd(m, 0x14000));
++		}
++	}
++	gpu_update(cc, 0x1124, 0x371fu, cfg);
++	gpu_update(cc, 0x1120, 1u, 1u);
++	bool restored = gpu_poll(cc, 0x1120, 1u, 0) &&
++	    (gpu_rd(cc, 0x1124) & 0x371fu) == (cfg & 0x371fu);
++	printf("RAPHAEL GPU: GMU XO restored=%u RCG=%#x/%#x; parent vote restored after CX off\n",
++	    restored, gpu_rd(cc, 0x1120), gpu_rd(cc, 0x1124));
+ }
+ 
+ static void
+@@ -123,14 +226,15 @@
+ 	if (log_secs != 1) { printf("RAPHAEL GPU: CX test requires ufslogsecs=1\n"); return; }
+ 	uint32_t cx = gpu_rd(cc, 0x106c), hw = gpu_rd(cc, 0x1540);
+ 	uint32_t ahb = gpu_rd(cc, 0x1078), cxo = gpu_rd(cc, 0x109c), gmu = gpu_rd(cc, 0x1098);
++	uint32_t parent_vote = gpu_rd(gcc, 0x52004);
+ 	/* Only take an idle software-controlled CX; leave GX and shared rails alone. */
+ 	if (cx == 0xffffffffu || hw == 0xffffffffu || ahb == 0xffffffffu ||
+-	    cxo == 0xffffffffu || gmu == 0xffffffffu || ((cx | hw) & (1u << 31)) ||
++	    cxo == 0xffffffffu || gmu == 0xffffffffu || parent_vote == 0xffffffffu || ((cx | hw) & (1u << 31)) ||
+ 	    (cx & 7u) != 1u || (gpu_rd(cc, 0x1124) & 0x371fu) != 0) {
+ 		printf("RAPHAEL GPU: CX test refused: not idle SW CX / XO GMU source\n");
+ 		return;
+ 	}
+-	printf("RAPHAEL GPU: CX test begin; XO only, no firmware/GX/DMA\n");
++	printf("RAPHAEL GPU: CX test begin; XO entry, no firmware/GX/DMA\n");
+ 	/* Let the 1s persistent logger save the checkpoint before power changes. */
+ 	int checkpoint = 0;
+ 	(void)tsleep(&checkpoint, PZERO, "gpucxlog", 3 * hz);
+@@ -159,7 +263,11 @@
+ 				printf("RAPHAEL GPU: CX test GMU reset=%#x init=%#x busy=%#x power=%#x retention=%#x\n",
+ 				    gpu_rd(m, 0x14000), gpu_rd(m, 0x14070), gpu_rd(m, 0x14068),
+ 				    gpu_rd(m, 0x14340), gpu_rd(m, 0x14730));
+-				if (gpu_rd(m, 0x14000) == 1u) { gpu_smmu_snapshot(gcc, cc); }
++				if (gpu_rd(m, 0x14000) == 1u) {
++					vm_offset_t s = gpu_smmu_snapshot(gcc, cc);
++					gpu_memory_test(s);
++					gpu_gmu_test(gcc, cc, m);
++				}
+ 				else { printf("RAPHAEL GPU: SMMU snapshot skipped: GMU not held reset\n"); }
+ 			} else { printf("RAPHAEL GPU: CX test GMU map failed\n"); }
+ 		}
+@@ -177,6 +285,13 @@
+ 	    (gpu_rd(cc, 0x109c) & 1u) == (cxo & 1u) && (gpu_rd(cc, 0x1078) & 1u) == (ahb & 1u);
+ 	printf("RAPHAEL GPU: CX test restored=%u off=%u GDSCR=%#x HW=%#x; no accelerator\n",
+ 	    restored, off, gpu_rd(cc, 0x106c), gpu_rd(cc, 0x1540));
++	uint32_t root = gpu_rd(cc, 0x1120);
++	if (off && root != 0xffffffffu && (root & (1u << 31))) {
++		gpu_update(gcc, 0x52004, 1u << 16, parent_vote);
++	}
++	printf("RAPHAEL GPU: parent vote restored=%u vote=%#x RCG=%#x\n",
++	    (gpu_rd(gcc, 0x52004) & (1u << 16)) == (parent_vote & (1u << 16)),
++	    gpu_rd(gcc, 0x52004), gpu_rd(cc, 0x1120));
+ }
+ 
+ void
+--- /dev/null
++++ b/bsd/dev/ArmSmmu4K.h
+@@ -0,0 +1,87 @@
++/* SPDX-License-Identifier: MIT
++ * Imported from UniXNU/ArmSmmu4K 29f386aea7a8a01798921178ee6055aa756ac049.
++ * MIT License
++ *
++ * Copyright (c) 2026 ArmSmmu4K contributors
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a copy
++ * of this software and associated documentation files (the "Software"), to deal
++ * in the Software without restriction, including without limitation the rights
++ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
++ * copies of the Software, and to permit persons to whom the Software is
++ * furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice shall be included in all
++ * copies or substantial portions of the Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
++ * SOFTWARE.
++
++ */
++#ifndef ARM_SMMU_4K_H
++#define ARM_SMMU_4K_H
++#include <stddef.h>
++#include <stdint.h>
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++typedef enum {
++    ArmSmmu4KSuccess = 0, ArmSmmu4KArgument, ArmSmmu4KBadRange,
++    ArmSmmu4KOverlap, ArmSmmu4KCapacity, ArmSmmu4KBudget,
++    ArmSmmu4KUnsupported, ArmSmmu4KStateMismatch,
++    ArmSmmu4KIoError, ArmSmmu4KTimeout, ArmSmmu4KBusy, ArmSmmu4KFault
++} ArmSmmu4KStatus;
++typedef struct {
++    unsigned input_bits;           /* 32..48, low-address TTBR0 profile. */
++    unsigned output_bits;          /* 32,36,40,42,44,48. */
++    uint64_t table_physical;        /* Caller-owned contiguous pool, aligned 4K. */
++    size_t leaf_budget;            /* Explicit upper bound on mapping work. */
++} ArmSmmu4KConfig;
++enum {ArmSmmu4KRead=1,ArmSmmu4KWrite=2,ArmSmmu4KExecute=4,ArmSmmu4KPrivileged=8};
++typedef struct {
++    uint64_t iova, physical, bytes;
++    unsigned permissions;          /* Read required; optional Write/Execute/Privileged. */
++    unsigned writeback;            /* 0=normal NC, 1=normal WB/WA. */
++    unsigned shareability;         /* 2=outer, 3=inner; explicit, no default. */
++} ArmSmmu4KRange;
++typedef struct {
++    uint64_t root_physical;
++    uint64_t mair;                 /* NC at index 0, WB/WA at index 1. */
++    size_t table_pages, leaf_pages;
++    unsigned start_level;
++    unsigned upper_region;        /* 0=Build TTBR0, 1=BuildUpper TTBR1. */
++} ArmSmmu4KResult;
++
++/* Build inactive ARM LPAE stage-1 tables with ONLY 4K level-3 leaves.
++ * Sorted disjoint low IOVA ranges; no sign extension or input conversion.
++ * No resource may map the table pool. Conflicting cache/shareability/privilege
++ * aliases refuse. Default 1/3 retains unprivileged PXN/UXN behavior. Execute
++ * and Privileged explicitly describe DEVICE-stage1 accesses (e.g. firmware),
++ * never CPU permissions or authorization to execute unauthenticated images.
++ * All validation/capacity checks precede table writes. Failure zeros result
++ * and leaves tables untouched. Success writes only result.table_pages pages.
++ * Caller guarantees real accessible, disjoint storage, immutable inputs,
++ * native-endian uint64_t table storage aligned to at least 8 bytes, actual
++ * physical ownership and matching CPU attributes/cache maintenance.
++ * NO MMIO, allocation, barriers, TLB operations or activation. This does NOT
++ * prove hardware support, coherent walks or a live isolated GPU context. */
++ArmSmmu4KStatus ArmSmmu4KBuild(const ArmSmmu4KConfig *config,
++    const ArmSmmu4KRange *ranges, size_t range_count, uint64_t *tables,
++    size_t table_capacity_pages, ArmSmmu4KResult *result);
++/* Same native 4K format for TTBR1's upper, sign-extended address region.
++ * IOVAs must already be in [2^64-2^input_bits,2^64); truncated low addresses
++ * refuse. Uses the architectural partial-root index width. No lower-region
++ * remapping, page-size conversion, MMIO or translation activation occurs. */
++ArmSmmu4KStatus ArmSmmu4KBuildUpper(const ArmSmmu4KConfig *config,
++    const ArmSmmu4KRange *ranges, size_t range_count, uint64_t *tables,
++    size_t table_capacity_pages, ArmSmmu4KResult *result);
++#ifdef __cplusplus
++}
++#endif
++#endif
+--- /dev/null
++++ b/bsd/dev/ArmSmmu4K.c
+@@ -0,0 +1,111 @@
++/* SPDX-License-Identifier: MIT */
++#include "ArmSmmu4K.h"
++#define PAGE_BYTES UINT64_C(4096)
++#define ADDRESS_MASK UINT64_C(0x0000fffffffff000)
++
++static ArmSmmu4KStatus build_region(const ArmSmmu4KConfig *config,
++    const ArmSmmu4KRange *ranges, size_t range_count, uint64_t *tables,
++    size_t capacity, ArmSmmu4KResult *result, unsigned upper)
++{
++    if (!result) return ArmSmmu4KArgument;
++    result->root_physical = result->mair = 0;
++    result->table_pages = result->leaf_pages = result->start_level = 0;
++    result->upper_region = 0;
++    if (!config || !ranges || !range_count || !tables || !capacity ||
++        capacity > SIZE_MAX / PAGE_BYTES || range_count > SIZE_MAX / sizeof(*ranges) ||
++        config->input_bits < 32 || config->input_bits > 48 ||
++        !(config->output_bits == 32 || config->output_bits == 36 || config->output_bits == 40 ||
++          config->output_bits == 42 || config->output_bits == 44 || config->output_bits == 48) ||
++        !config->leaf_budget || config->leaf_budget > (SIZE_MAX - 1) / 3 ||
++        ((uintptr_t)tables & 7)) return ArmSmmu4KArgument;
++    if (range_count > config->leaf_budget) return ArmSmmu4KBudget;
++    uint64_t input_limit = UINT64_C(1) << config->input_bits;
++    uint64_t output_limit = UINT64_C(1) << config->output_bits;
++    uint64_t pool_bytes = (uint64_t)capacity * PAGE_BYTES;
++    uint64_t pool = config->table_physical;
++    if ((pool & 4095) || pool >= output_limit || pool_bytes > output_limit - pool)
++        return ArmSmmu4KBadRange;
++    size_t leaves = 0;
++    uint64_t previous_end = 0;
++    for (size_t i = 0; i < range_count; ++i) {
++        const ArmSmmu4KRange *r = &ranges[i];
++        if (!r->bytes || ((r->iova | r->physical | r->bytes) & 4095) ||
++            (!(r->permissions & ArmSmmu4KRead) || (r->permissions & ~15u)) || r->writeback > 1 || (r->shareability != 2 && r->shareability != 3) ||
++            r->physical >= output_limit || r->bytes > output_limit - r->physical)
++            return ArmSmmu4KBadRange;
++        if (upper ? (r->iova < UINT64_MAX-input_limit+1 || r->bytes-1 > UINT64_MAX-r->iova) :
++                    (r->iova >= input_limit || r->bytes > input_limit-r->iova))
++            return ArmSmmu4KBadRange;
++        if (i && r->iova <= previous_end) return ArmSmmu4KOverlap;
++        previous_end = r->iova + (r->bytes-1);
++        if (r->physical < pool + pool_bytes && pool < r->physical + r->bytes)
++            return ArmSmmu4KOverlap;
++        for (size_t j = 0; j < i; ++j) {
++            if ((r->writeback != ranges[j].writeback || r->shareability != ranges[j].shareability || ((r->permissions ^ ranges[j].permissions) & ArmSmmu4KPrivileged)) && r->physical < ranges[j].physical + ranges[j].bytes &&
++                ranges[j].physical < r->physical + r->bytes) return ArmSmmu4KOverlap;
++        }
++        uint64_t pages = r->bytes / PAGE_BYTES;
++        if (pages > config->leaf_budget - leaves) return ArmSmmu4KBudget;
++        leaves += (size_t)pages;
++    }
++    /* Each range has at least one leaf, so the validated leaf budget also
++     * bounds the range/alias loops. Sorted IOVAs make prefix counting exact. */
++    unsigned levels = (config->input_bits - 12 + 8) / 9;
++    unsigned start = 4 - levels;
++    size_t required = 1;
++    uint64_t last[3] = {UINT64_MAX, UINT64_MAX, UINT64_MAX};
++    for (size_t i = 0; i < range_count; ++i) {
++        for (uint64_t offset = 0; offset < ranges[i].bytes; offset += PAGE_BYTES) {
++            uint64_t va = ranges[i].iova + offset;
++            for (unsigned level = start; level < 3; ++level) {
++                uint64_t prefix = va >> (39 - 9 * level);
++                if (prefix != last[level]) { ++required; last[level] = prefix; }
++            }
++        }
++    }
++    if (required > capacity) return ArmSmmu4KCapacity;
++    for (size_t i = 0; i < required * 512; ++i) tables[i] = 0;
++    size_t next = 1;
++    for (size_t i = 0; i < range_count; ++i) {
++        const ArmSmmu4KRange *r = &ranges[i];
++        uint64_t attributes = (1u << 11) | (1u << 10) | 3;
++        if (!(r->permissions & ArmSmmu4KExecute)) attributes |= UINT64_C(3) << 53;
++        if (!(r->permissions & ArmSmmu4KPrivileged)) attributes |= 1u << 6;
++        if (!(r->permissions & ArmSmmu4KWrite)) attributes |= 1u << 7;
++        attributes |= (uint64_t)r->shareability << 8;
++        if (r->writeback) attributes |= 1u << 2;
++        for (uint64_t offset = 0; offset < r->bytes; offset += PAGE_BYTES) {
++            uint64_t va = r->iova + offset;
++            size_t table = 0;
++            for (unsigned level = start; level < 3; ++level) {
++                unsigned shift = 39-9*level;
++                unsigned width = level==start ? config->input_bits-shift : 9;
++                size_t slot = table * 512 + ((va >> shift) & ((1u<<width)-1));
++                if (!tables[slot]) tables[slot] = (pool + PAGE_BYTES * next++) | 3;
++                table = (size_t)(((tables[slot] & ADDRESS_MASK) - pool) / PAGE_BYTES);
++            }
++            tables[table * 512 + ((va >> 12) & 511)] = (r->physical + offset) | attributes;
++        }
++    }
++    result->root_physical = pool;
++    result->mair = 0xff44;
++    result->table_pages = required;
++    result->leaf_pages = leaves;
++    result->start_level = start;
++    result->upper_region = upper;
++    return ArmSmmu4KSuccess;
++}
++
++ArmSmmu4KStatus ArmSmmu4KBuild(const ArmSmmu4KConfig *config,
++    const ArmSmmu4KRange *ranges, size_t range_count, uint64_t *tables,
++    size_t capacity, ArmSmmu4KResult *result)
++{
++    return build_region(config,ranges,range_count,tables,capacity,result,0);
++}
++
++ArmSmmu4KStatus ArmSmmu4KBuildUpper(const ArmSmmu4KConfig *config,
++    const ArmSmmu4KRange *ranges, size_t range_count, uint64_t *tables,
++    size_t capacity, ArmSmmu4KResult *result)
++{
++    return build_region(config,ranges,range_count,tables,capacity,result,1);
++}
